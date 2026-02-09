@@ -1,5 +1,10 @@
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.source !== "API_INTERCEPTOR") return;
+  console.log("🔔 Background received message:", msg?.url);
+  
+  if (msg?.source !== "API_INTERCEPTOR") {
+    console.log("⏭️  Skipping: not from API_INTERCEPTOR");
+    return;
+  }
 
   const isJsProfileApi =
     typeof msg.url === "string" &&
@@ -8,7 +13,10 @@ chrome.runtime.onMessage.addListener((msg) => {
     msg.data &&
     msg.data.uniqueId;
 
-  if (!isJsProfileApi) return;
+  if (!isJsProfileApi) {
+    console.log("⏭️  Skipping: doesn't match criteria. URL:", msg.url, "Has uniqueId:", !!msg.data?.uniqueId);
+    return;
+  }
 
   console.log("✅ JS PROFILE DATA FOUND (background):", msg.data);
 
@@ -36,4 +44,3 @@ async function sendCandidateData(data) {
     console.error("❌ Failed to send candidate data (background):", err);
   }
 }
-
