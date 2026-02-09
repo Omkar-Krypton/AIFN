@@ -5,19 +5,33 @@
   const originalFetch = window.fetch;
 
   window.fetch = async (...args) => {
+    const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || 'unknown';
+    console.log("🔍 Fetch intercepted BEFORE call:", url);
+    
     const response = await originalFetch(...args);
     
-    const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || 'unknown';
-    console.log("🔍 Fetch intercepted:", url);
+    console.log("🔍 Fetch intercepted AFTER call:", url, "Status:", response.status);
 
     try {
       const clone = response.clone();
       const ct = clone.headers.get("content-type") || "";
+      
+      console.log("📋 Content-Type:", ct, "for URL:", url);
 
       if (ct.includes("application/json")) {
         const data = await clone.json();
         
-        console.log("📤 Posting message for:", url, data);
+        console.log("📤 Posting message for:", url);
+        console.log("📦 Data:", data);
+        
+        // Check if it matches our criteria
+        const isTargetApi = url.includes("recruiter-js-profile-services") ||
+                           url.includes("candidates") || 
+                           url.includes("contactdetails");
+        
+        if (isTargetApi) {
+          console.log("🎯 TARGET API DETECTED:", url);
+        }
 
         window.postMessage(
           {
@@ -29,6 +43,8 @@
           },
           "*"
         );
+      } else {
+        console.log("⏭️  Skipping non-JSON response for:", url);
       }
     } catch (e) {
       console.error("❌ Error intercepting fetch:", url, e);
@@ -42,16 +58,36 @@
 
   function InterceptedXHR() {
     const xhr = new OriginalXHR();
+    
+    // Track the URL from open()
+    const originalOpen = xhr.open;
+    xhr.open = function(...args) {
+      console.log("🔍 XHR.open() called with URL:", args[1]);
+      return originalOpen.apply(this, args);
+    };
 
     xhr.addEventListener("load", function () {
-      console.log("🔍 XHR intercepted:", xhr.responseURL);
+      console.log("🔍 XHR load event fired for:", xhr.responseURL);
+      console.log("📊 XHR Status:", xhr.status, "Ready State:", xhr.readyState);
       
       try {
         const ct = xhr.getResponseHeader("content-type") || "";
+        console.log("📋 XHR Content-Type:", ct);
+        
         if (ct.includes("application/json")) {
           const data = JSON.parse(xhr.responseText);
           
-          console.log("📤 Posting XHR message for:", xhr.responseURL, data);
+          console.log("📤 Posting XHR message for:", xhr.responseURL);
+          console.log("📦 XHR Data:", data);
+          
+          // Check if it matches our criteria
+          const isTargetApi = xhr.responseURL.includes("recruiter-js-profile-services") ||
+                             xhr.responseURL.includes("candidates") || 
+                             xhr.responseURL.includes("contactdetails");
+          
+          if (isTargetApi) {
+            console.log("🎯 TARGET XHR API DETECTED:", xhr.responseURL);
+          }
           
           window.postMessage(
             {
@@ -63,9 +99,12 @@
             },
             "*"
           );
+        } else {
+          console.log("⏭️  Skipping non-JSON XHR response for:", xhr.responseURL);
         }
       } catch (e) {
         console.error("❌ Error intercepting XHR:", xhr.responseURL, e);
+        console.error("Response text:", xhr.responseText?.substring(0, 200));
       }
     });
 

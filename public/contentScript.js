@@ -15,6 +15,14 @@ window.addEventListener("message", (event) => {
 
   if (event.data?.source === "API_INTERCEPTOR") {
     console.log("📨 Content script received message:", event.data.url);
-    chrome.runtime.sendMessage(event.data);
+    console.log("📦 Message data:", event.data);
+    
+    try {
+      chrome.runtime.sendMessage(event.data, (response) => {
+        console.log("✅ Message sent to background, response:", response);
+      });
+    } catch (e) {
+      console.error("❌ Error sending message to background:", e);
+    }
   }
 });
