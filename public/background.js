@@ -4,7 +4,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   const isJsProfileApi =
     typeof msg.url === "string" &&
     (msg.url.includes("recruiter-js-profile-services") ||
-      msg.url.includes("candidates")) &&
+      msg.url.includes("candidates") || msg.url.includes("contactdetails")) &&
     msg.data &&
     msg.data.uniqueId;
 
