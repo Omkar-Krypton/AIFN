@@ -118,6 +118,11 @@
   // 🔥 AUTO-CLICK "View phone number" button to trigger contactdetails API
   function autoClickViewPhoneButton() {
     try {
+
+        // ✅ Route guard: only run on /v3/preview
+    if (!window.location.pathname.includes('/v3/preview')) {
+      return false;
+    }
       // Search all buttons for the one with "View phone number" text
       const buttons = document.querySelectorAll('button');
       
