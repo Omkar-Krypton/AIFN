@@ -107,6 +107,7 @@ function buildFrontPageDetail(candidate) {
     name: candidate.jsUserName || "",
     email: "",
     phone: "",
+    naukri_unique_id: candidate.uniqueId || "",
     education: {
       degree: ugEducation.course || "",
       specialization: ugEducation.specialization || "",
@@ -126,15 +127,15 @@ async function sendListingCandidatesData(data) {
 
     const filteredCandidates = tuples
       .map(extractFilteredCandidate)
-      .filter((candidate) => candidate.uniqueId);
+      .filter((candidate) => candidate.uniqueId && candidate.jsUserId);
 
     if (!filteredCandidates.length) {
-      console.log("⏭️  No valid candidate uniqueId found in tuples");
+      console.log("⏭️  No valid candidate uniqueId/jsUserId found in tuples");
       return;
     }
 
     const signature = `${data?.sid || "no-sid"}:${filteredCandidates
-      .map((candidate) => candidate.uniqueId)
+      .map((candidate) => String(candidate.jsUserId))
       .join(",")}`;
     if (signature === lastListingSignature) {
       console.log("⏭️  Skipping duplicate listing payload");
@@ -144,7 +145,7 @@ async function sendListingCandidatesData(data) {
 
     const payload = {
       jobBoard: "njb",
-      ids: filteredCandidates.map((candidate) => candidate.uniqueId),
+      ids: filteredCandidates.map((candidate) => String(candidate.jsUserId)),
       jobBoardFrontPageDetails: filteredCandidates.map(buildFrontPageDetail),
     };
 
