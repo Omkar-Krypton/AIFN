@@ -6,12 +6,20 @@ chrome.runtime.onMessage.addListener((msg) => {
     return;
   }
 
+  // const isJsProfileApi =
+  //   typeof msg.url === "string" &&
+  //   (msg.url.includes("recruiter-js-profile-services") ||
+  //     msg.url.includes("candidates") || msg.url.includes("contactdetails")) &&
+  //   msg.data &&
+  //   msg.data.uniqueId;
+
   const isJsProfileApi =
     typeof msg.url === "string" &&
     (msg.url.includes("recruiter-js-profile-services") ||
-      msg.url.includes("candidates") || msg.url.includes("contactdetails")) &&
-    msg.data &&
-    msg.data.uniqueId;
+      msg.url.includes("candidates") || msg.url.includes("contactdetails")) 
+  
+  const isResumeApi = typeof msg.url === "string" && msg.url.includes("download/resume");
+
 
   if (!isJsProfileApi) {
     console.log("⏭️  Skipping: doesn't match criteria. URL:", msg.url, "Has uniqueId:", !!msg.data?.uniqueId);
@@ -44,3 +52,4 @@ async function sendCandidateData(data) {
     console.error("❌ Failed to send candidate data (background):", err);
   }
 }
+
