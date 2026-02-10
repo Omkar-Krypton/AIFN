@@ -39,7 +39,8 @@
             kind: "FETCH",
             url: clone.url,
             status: clone.status,
-            data
+            data,
+            pathname: window.location.pathname
           },
           "*"
         );
@@ -95,7 +96,8 @@
               kind: "XHR",
               url: xhr.responseURL,
               status: xhr.status,
-              data: data
+              data: data,
+              pathname: window.location.pathname
             },
             "*"
           );
