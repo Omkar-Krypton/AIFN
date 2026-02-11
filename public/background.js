@@ -21,6 +21,9 @@ const lastSentCandidatesSignatureByUserId = new Map(); // userId -> signature
 let latestPreviewUserId = null;
 let latestPreviewUniqueId = null;
 
+// backendCandidateId (UUID) keyed by naukri userId (string)
+const backendCandidateIdByUserId = new Map();
+
 chrome.runtime.onMessage.addListener((msg) => {
   console.log("🔔 Background received message:", msg?.url);
 
@@ -64,16 +67,22 @@ chrome.runtime.onMessage.addListener((msg) => {
       return;
     }
 
-    const candidate_id = latestPreviewUniqueId || latestPreviewUserId;
-    if (!candidate_id) {
-      console.log("⏳ Resume captured but no candidate_id available yet");
+    const userIdKey = latestPreviewUserId ? String(latestPreviewUserId) : null;
+    const backendCandidateId = userIdKey ? backendCandidateIdByUserId.get(userIdKey) : null;
+
+    if (!backendCandidateId) {
+      console.log("⏳ Resume captured but backend candidate_id not available yet");
       return;
     }
 
+    const profileData = userIdKey ? profileByUserId.get(userIdKey) : null;
+    const cv_updated_at = getCvUpdatedAtForResume(profileData);
+
     return uploadResume({
-      candidate_id,
+      candidate_id: backendCandidateId,
       cvBuffer,
-      cv_updated_at: new Date().toISOString(),
+      // Backend expects YYYY-MM-DD (string) or null
+      cv_updated_at,
     });
   }
 
@@ -122,6 +131,7 @@ async function uploadResume(data) {
       headers: {
         "Content-Type": "application/json",
         accept: "*/*",
+        Authorization: CANDIDATES_BEARER_TOKEN,
       },
       body: JSON.stringify(data),
     });
@@ -135,6 +145,18 @@ async function uploadResume(data) {
   } catch (err) {
     console.error("❌ Failed to upload resume:", err);
   }
+}
+
+function getCvUpdatedAtForResume(profileData) {
+  // Prefer cvAccessDate if available (it reflects resume access/update)
+  if (profileData?.cvAccessDate) {
+    return toIsoDateString(String(profileData.cvAccessDate));
+  }
+  if (profileData?.modifiedDate) {
+    // already YYYY-MM-DD in Naukri payloads
+    return String(profileData.modifiedDate);
+  }
+  return formatLocalDateString(new Date());
 }
 
 async function sendCandidateData(data) {
@@ -559,6 +581,22 @@ async function maybeSendCombinedCandidateToCandidatesApi(userId) {
     });
 
     const resultText = await res.text();
+
+    // Try to capture backend candidate UUID for resume upload API.
+    try {
+      const parsed = JSON.parse(resultText);
+      const candidateId =
+        parsed?.data?.id ||
+        parsed?.candidate?.id ||
+        parsed?.id ||
+        null;
+      if (candidateId) {
+        backendCandidateIdByUserId.set(String(userId), String(candidateId));
+      }
+    } catch (e) {
+      // response might not be JSON; ignore
+    }
+
     console.log("✅ Sent merged profile+contacts payload to /candidates:", {
       status: res.status,
       body: resultText,
