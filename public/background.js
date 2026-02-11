@@ -2,11 +2,22 @@ const VERIFIED_IDS_API_URL = "http://localhost:2000/candidates/verified-ids";
 const VERIFIED_IDS_BEARER_TOKEN =
   "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImE4YzQ2NjU1LTA2ODMtNDQ3OC1iYzFkLTIyOWVmYmMyOGJkMiIsImVtYWlsIjoic2hydXRpQHBsYWNvbmhyLmNvbSIsInJvbGUiOiJ1c2VyIiwiaXNBY3RpdmUiOnRydWUsImZ1bGxOYW1lIjoiU2hydXRpIiwibW9iaWxlIjoiMTIzNDU2Nzg5MCIsImxvY2F0aW9uIjoiQWhtZWRhYmFkIiwiY3VzdG9tZXJJZCI6IjhkMmY0MGFjLTk5YmEtNDk0Yy1iNWI1LTI4YmRjMzRiNDU2OCIsImlhdCI6MTc3MDcyNTYzMSwiZXhwIjoxOTI4NTEzNjMxfQ.X39paZs28FaRQs3pdohFWAM0jebLMKO8HLCzcm7DvEo";
 
+const CANDIDATES_API_URL = "http://localhost:2000/candidates";
+const CANDIDATES_BEARER_TOKEN =
+  "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjlkZDQ2ZWFlLTJiMjItNDA0Yy1iNGE0LTFjMWM3M2I5Y2E0YyIsImVtYWlsIjoiYmh1bWlrYUBwbGFjb25oci5jb20iLCJyb2xlIjoidXNlciIsImlzQWN0aXZlIjp0cnVlLCJmdWxsTmFtZSI6IkJodW1pa2EgS290aGFyaSIsIm1vYmlsZSI6IjEyMzQ1Njc4OTAiLCJsb2NhdGlvbiI6IkFobWVkYWJhZCIsImN1c3RvbWVySWQiOiI4ZDJmNDBhYy05OWJhLTQ5NGMtYjViNS0yOGJkYzM0YjQ1NjgiLCJpYXQiOjE3NzA3MzkzMDYsImV4cCI6MTkyODUyNzMwNn0.9pGc5sw6gjMy4C8gWJZusRg23bJSBIowapnZtnZVb3Q";
+
 let lastListingSignature = null;
+
+// Profile page (preview) needs 2 API responses before sending /candidates:
+// 1) recruiter-js-profile-services (profile)
+// 2) contactdetails (contact info)
+const profileByUserId = new Map(); // userId -> profile response
+const contactByUserId = new Map(); // userId -> contactdetails response
+const lastSentCandidatesSignatureByUserId = new Map(); // userId -> signature
 
 chrome.runtime.onMessage.addListener((msg) => {
   console.log("🔔 Background received message:", msg?.url);
-  
+
   if (msg?.source !== "API_INTERCEPTOR") {
     console.log("⏭️  Skipping: not from API_INTERCEPTOR");
     return;
@@ -19,17 +30,39 @@ chrome.runtime.onMessage.addListener((msg) => {
   //   msg.data &&
   //   msg.data.uniqueId;
 
-  const isJsProfileApi =
-    typeof msg.url === "string" &&
-    (msg.url.includes("recruiter-js-profile-services") ||
-      msg.url.includes("candidates") || msg.url.includes("contactdetails")) 
-  
+  // Profile page API: recruiter-js-profile-services AND preview route
+  const isRecruiterJsProfileService =
+    typeof msg.url === "string" && msg.url.includes("recruiter-js-profile-services");
+  const isContactDetailsApi =
+    typeof msg.url === "string" && msg.url.includes("contactdetails");
+  const isPreviewPage =
+    typeof msg.pathname === "string" && msg.pathname.includes("preview");
+
+  const isJsProfileApi = isRecruiterJsProfileService && isPreviewPage;
+  const isContactDetailsOnPreview = isContactDetailsApi && isPreviewPage;
+
   const isResumeApi = typeof msg.url === "string" && msg.url.includes("download/resume");
   const isListingPage = typeof msg.pathname === "string" && msg.pathname.includes("search");
   const hasTuples = Array.isArray(msg?.data?.tuples);
 
   if (isListingPage && hasTuples) {
     return sendListingCandidatesData(msg.data);
+  }
+
+  if (isContactDetailsOnPreview) {
+    const userId = msg?.data?.userId;
+    if (!userId) {
+      console.log("⏭️  Contactdetails missing userId");
+      return;
+    }
+
+    contactByUserId.set(String(userId), msg.data);
+    console.log("✅ CONTACT DETAILS FOUND (background):", {
+      userId,
+      email: msg?.data?.email,
+    });
+
+    return maybeSendCombinedCandidateToCandidatesApi(String(userId));
   }
 
   if (!isJsProfileApi) {
@@ -40,7 +73,15 @@ chrome.runtime.onMessage.addListener((msg) => {
   console.log("✅ JS PROFILE DATA FOUND (background):", msg.data);
 
   // 🔥 Send data to backend from the background service worker
-  return sendCandidateData(msg.data);
+  sendCandidateData(msg.data);
+
+  const profileUserId = msg?.data?.userId;
+  if (profileUserId) {
+    profileByUserId.set(String(profileUserId), msg.data);
+    return maybeSendCombinedCandidateToCandidatesApi(String(profileUserId));
+  }
+
+  console.log("⏭️  Profile response missing userId, cannot merge with contacts");
 });
 
 async function sendCandidateData(data) {
@@ -61,6 +102,427 @@ async function sendCandidateData(data) {
     console.log("✅ Sent to backend (background):", result);
   } catch (err) {
     console.error("❌ Failed to send candidate data (background):", err);
+  }
+}
+
+/** Format a Date as YYYY-MM-DD using local date (avoids UTC off-by-one). */
+function formatLocalDateString(d) {
+  const y = d.getFullYear();
+  const m = d.getMonth() + 1;
+  const day = d.getDate();
+  return `${y}-${String(m).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function toIsoDateString(input) {
+  if (!input || typeof input !== "string") return "";
+  const d = new Date(input);
+  if (Number.isNaN(d.getTime())) return "";
+  return formatLocalDateString(d);
+}
+
+function calcAgeFromIsoDate(isoDate) {
+  if (!isoDate) return "";
+  const d = new Date(isoDate);
+  if (Number.isNaN(d.getTime())) return "";
+  const now = new Date();
+  let age = now.getFullYear() - d.getFullYear();
+  const m = now.getMonth() - d.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < d.getDate())) age -= 1;
+  return String(age);
+}
+
+function splitCommaValues(input) {
+  if (!input || typeof input !== "string") return [];
+  return input
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** "2 Months" -> "2M", "1 Month" -> "1M" */
+function abbreviateNoticePeriod(np) {
+  if (!np || typeof np !== "string") return "";
+  const s = np.trim();
+  const m = s.match(/^(\d+)\s*month(s)?$/i);
+  if (m) return m[1] + "M";
+  return s;
+}
+
+/** Millis to YYYY-MM-DD (local date); null/0 -> null */
+function millisToIsoDate(millis) {
+  if (millis == null || millis === 0) return null;
+  const d = new Date(Number(millis));
+  if (Number.isNaN(d.getTime())) return null;
+  return formatLocalDateString(d);
+}
+
+/** Format CTC for display: ctcType USD + ctcValue 0.80 -> "$ 80,000"; INR Lacs -> "₹ 80,000" */
+function formatCtcDisplay(profile) {
+  const raw = profile?.rawCtc || profile?.ctcValue || "";
+  const type = (profile?.ctcType || "").toUpperCase();
+  if (!raw) return "";
+  const num = parseFloat(String(raw).replace(/[^\d.]/g, ""), 10);
+  if (Number.isNaN(num)) return profile?.ctc || "";
+  if (type === "USD") {
+    const val = Math.round(num * 100000);
+    return "$ " + val.toLocaleString("en-IN");
+  }
+  if (type === "INR") {
+    const val = Math.round(num * 100000);
+    return "₹ " + val.toLocaleString("en-IN");
+  }
+  return profile?.ctc || "";
+}
+
+/** Build headline from current work: "Designation  at  Organization  since StartDate" */
+function buildHeadline(profile) {
+  const work = Array.isArray(profile?.workExperiences) ? profile.workExperiences : [];
+  const current = work.find(
+    (w) =>
+      (w?.empTypeLable || "").toLowerCase().includes("current") ||
+      (w?.endDate || "").toLowerCase().includes("till")
+  );
+  if (!current) return profile?.jobTitle || "";
+  const designation = current.designation || "";
+  const organization = current.organization || "";
+  const since = current.startDate || "";
+  const parts = [designation, organization, since].filter(Boolean);
+  if (parts.length === 0) return profile?.jobTitle || "";
+  return designation + "  at  " + organization + "  since " + since;
+}
+
+function sanitizePhoneNumber(value) {
+  if (!value || typeof value !== "string") return "";
+  return value.replace(/[^\d]/g, "");
+}
+
+/** Normalize to display form: strip leading 91 (India) so 9107314205954 -> 07314205954; keep others as-is. */
+function normalizePhoneForDisplay(digits) {
+  if (!digits) return "";
+  if (digits.length > 10 && digits.startsWith("91")) return digits.slice(2);
+  return digits;
+}
+
+function extractContactDetailsContacts(contactDetails) {
+  if (!contactDetails || typeof contactDetails !== "object") return [];
+
+  const contacts = [];
+
+  if (contactDetails.email) {
+    contacts.push({ contact_type: "email", contact_value: String(contactDetails.email) });
+  }
+
+  const parsed = Array.isArray(contactDetails.parsedPhoneNos) ? contactDetails.parsedPhoneNos : [];
+  const phoneValues = [];
+  let mobileForWhatsapp = null;
+
+  for (const p of parsed) {
+    const raw = (p?.number || "").trim();
+    const digits = sanitizePhoneNumber(raw);
+    if (digits.length < 8) continue;
+    const display = normalizePhoneForDisplay(digits);
+    if (!display) continue;
+    phoneValues.push(display);
+    if ((p?.type || "").toString().toUpperCase() === "M") mobileForWhatsapp = display;
+  }
+
+  if (!phoneValues.length) {
+    const phoneNoRaw = typeof contactDetails.phoneNo === "string" ? contactDetails.phoneNo : "";
+    const matches = phoneNoRaw.match(/\d{8,}/g) || [];
+    for (const m of matches) {
+      const d = normalizePhoneForDisplay(sanitizePhoneNumber(m));
+      if (d && !phoneValues.includes(d)) phoneValues.push(d);
+    }
+  }
+
+  const seen = new Set();
+  for (const num of phoneValues) {
+    if (seen.has(num)) continue;
+    seen.add(num);
+    contacts.push({ contact_type: "phone", contact_value: num });
+  }
+
+  const whatsappNum = mobileForWhatsapp || phoneValues[0];
+  if (whatsappNum) {
+    contacts.push({ contact_type: "whatsapp", contact_value: whatsappNum });
+  }
+
+  return contacts;
+}
+
+function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
+  const fullName = profile?.name || "";
+  const preferredLocations = splitCommaValues(profile?.prefLocation);
+  const keywords = splitCommaValues(profile?.keywords);
+
+  const contactsFromContactApi = extractContactDetailsContacts(contactDetails);
+  const contacts = contactsFromContactApi.length ? contactsFromContactApi : [];
+  if (!contacts.length && profile?.email) {
+    contacts.push({ contact_type: "email", contact_value: profile.email });
+  }
+
+  const workExperiences = Array.isArray(profile?.workExperiences) ? profile.workExperiences : [];
+  const mappedWorkExperiences = workExperiences.map((we) => {
+    const isCurrent =
+      (we?.empTypeLable || "").toString().toLowerCase().includes("current") ||
+      (we?.endDate || "").toString().toLowerCase().includes("till");
+    return {
+      company_name: we?.organization || "",
+      company_description: "",
+      company_website: "",
+      location: "",
+      job_title: we?.designation || "",
+      start_date: millisToIsoDate(we?.startYearMillis) || we?.startDate || "",
+      end_date: isCurrent ? null : (millisToIsoDate(we?.endYearMillis) || we?.endDate || ""),
+      is_current: isCurrent,
+      work_summary: we?.profile || "",
+    };
+  });
+
+  const educations = Array.isArray(profile?.educations) ? profile.educations : [];
+  const mappedEducations = educations.map((ed) => {
+    const degree = ed?.course?.label || "";
+    const spec = ed?.spec?.label || "";
+    const year = ed?.yearOfCompletion || "";
+    const eduTypeId = ed?.educationTypeId;
+    const fieldOfStudy = eduTypeId === 2 ? "PG" : "UG";
+    const inst = ed?.institute?.label || ed?.entityInstitute?.label || "";
+    const desc = [degree, spec, year].filter(Boolean).join(",") || "";
+    return {
+      institution_name: inst,
+      degree,
+      field_of_study: fieldOfStudy,
+      specialization: spec,
+      start_date: "",
+      completion_date: year,
+      grade: "",
+      location: "",
+      description: desc,
+    };
+  });
+
+  const languages = Array.isArray(profile?.languages) ? profile.languages : [];
+  const mappedLanguages = languages.map((l) => {
+    const ability = (l?.ability || "").toString().toLowerCase();
+    return {
+      language: l?.lang || "",
+      proficiency: l?.proficiency?.label || "",
+      can_read: ability.includes("read"),
+      can_write: ability.includes("write"),
+      can_speak: ability.includes("speak"),
+    };
+  });
+
+  const projects = Array.isArray(profile?.projects) ? profile.projects : [];
+  const mappedProjects = projects.map((p) => {
+    const start = millisToIsoDate(p?.startYearMillis) || "";
+    const end = millisToIsoDate(p?.endYearMillis) || "";
+    const description = p?.details || "";
+
+    const technologies = [];
+    if (typeof p?.skills === "string" && p.skills.trim()) {
+      p.skills.split(",").forEach((seg) => {
+        const t = seg.trim();
+        if (t) technologies.push(t);
+      });
+    }
+
+    return {
+      title: p?.project || "",
+      description,
+      role: description ? `Project description: ${description}` : "",
+      client: "",
+      start_date: start,
+      end_date: end,
+      technologies_used: technologies,
+      url: null,
+    };
+  });
+
+  const skillsList = [];
+  keywords.forEach((k) => skillsList.push({ skill_name: k.trim(), category: null }));
+  (profile?.skills || []).forEach((s) => {
+    const label = s?.skill?.label || "";
+    if (label && !skillsList.some((x) => x.skill_name === label)) {
+      skillsList.push({ skill_name: label, category: "it_skills" });
+    }
+  });
+  const displayKw = splitCommaValues(profile?.displayKeywords || "");
+  displayKw.forEach((k) => {
+    const name = k.trim();
+    if (name && !skillsList.some((x) => x.skill_name === name)) {
+      skillsList.push({ skill_name: name, category: "may_also_know" });
+    }
+  });
+
+  const lastActiveDate = profile?.viewDate
+    ? toIsoDateString(profile.viewDate)
+    : profile?.activeDate
+      ? String(profile.activeDate).slice(0, 10)
+      : "";
+
+  return {
+    title: "",
+    full_name: fullName,
+    avatar: "https://static.naukimg.com/s/7/112/i/defaultAvatar.a0a6df38.svg",
+    source: "NJ",
+    headline: buildHeadline(profile) || profile?.jobTitle || "",
+    designation: profile?.role || (workExperiences[0]?.designation) || "",
+    date_of_birth: toIsoDateString(profile?.birthDate),
+    place_of_birth: "",
+    gender: profile?.gender || "",
+    nationality: [],
+    religion: "",
+    mother_tongue: "",
+    marital_status: profile?.maritalStatus || "",
+    category: "General",
+    notice_period: abbreviateNoticePeriod(profile?.noticePeriod) || "",
+    physically_challenged: "",
+    desired_job_type: {
+      job_type: profile?.jobType || "",
+      employment_status: profile?.empStatus || "",
+    },
+    work_authority: profile?.workStatusOther ? [profile.workStatusOther] : [],
+    total_experience_years: profile?.totalExperience || profile?.rawTotalExperience || "",
+    modified_at: profile?.modifiedDate || "",
+    last_active: lastActiveDate,
+    current_ctc: formatCtcDisplay(profile),
+    expected_ctc: (profile?.expectedCtcValue && parseFloat(profile.expectedCtcValue) > 0)
+      ? formatCtcDisplay({ ...profile, ctcValue: profile.expectedCtcValue, rawCtc: profile.rawExpectedCtc, ctcType: profile.expectedCtcType })
+      : "",
+    linkedin_url: null,
+    contacts,
+    addresses: [
+      {
+        address_type: "current",
+        street: "",
+        city: profile?.city || "",
+        state: "",
+        postal_code: profile?.pin || "",
+        country: "",
+      },
+    ],
+    documents: [],
+    professional_summary: {
+      summary: profile?.jobTitle || "",
+      p_work_summary: profile?.summary || "",
+      role: profile?.role || "",
+      department: profile?.farea || "",
+      industry: profile?.industryType || "",
+      total_experience_years: profile?.totalExperience || "",
+    },
+    job_preference: {
+      desired_position: profile?.role || "",
+      desired_job_type: profile?.jobType || "",
+      preferred_locations: preferredLocations,
+      willing_to_relocate: false,
+      travel_willingness: null,
+      notice_period: abbreviateNoticePeriod(profile?.noticePeriod) || "",
+      reason_for_change: null,
+      earliest_joining_date: null,
+      functional_area: profile?.farea || "",
+      shift_type: null,
+      current_location: profile?.city || "",
+    },
+    job_board_unique_ids: {
+      shine_id: "",
+      naukri_id: profile?.userId ? String(profile.userId) : "",
+      linkedin_id: "",
+    },
+    work_experiences: mappedWorkExperiences,
+    educations: mappedEducations,
+    skills: skillsList,
+    languages: mappedLanguages,
+    projects: mappedProjects,
+    certifications: [],
+    trainings: [],
+    achievements: [],
+    publications: [],
+    leadership_volunteering: [],
+    affiliations: [],
+    references: [],
+  };
+}
+
+async function maybeSendCombinedCandidateToCandidatesApi(userId) {
+  try {
+    if (!userId) return;
+
+    const profileData = profileByUserId.get(userId);
+    const contactDetails = contactByUserId.get(userId);
+
+    if (!profileData || !contactDetails) {
+      console.log("⏳ Waiting for both APIs before /candidates:", {
+        userId,
+        hasProfile: !!profileData,
+        hasContactDetails: !!contactDetails,
+      });
+      return;
+    }
+
+    const signature = [
+      userId,
+      profileData?.uniqueId || "",
+      profileData?.viewDateMillis || profileData?.viewDate || "",
+      contactDetails?.email || "",
+      contactDetails?.phoneNo || "",
+    ].join("|");
+
+    const lastSig = lastSentCandidatesSignatureByUserId.get(userId);
+    if (lastSig === signature) {
+      console.log("⏭️  Skipping duplicate /candidates send (same signature):", userId);
+      return;
+    }
+    lastSentCandidatesSignatureByUserId.set(userId, signature);
+
+    const payload = mapProfileResponseToCandidatesPayload(profileData, contactDetails);
+
+    const res = await fetch(CANDIDATES_API_URL, {
+      method: "POST",
+      headers: {
+        accept: "*/*",
+        Authorization: CANDIDATES_BEARER_TOKEN,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const resultText = await res.text();
+    console.log("✅ Sent merged profile+contacts payload to /candidates:", {
+      status: res.status,
+      body: resultText,
+      naukri_unique_id: payload?.job_board_unique_ids?.naukri_unique_id,
+      naukri_id: payload?.job_board_unique_ids?.naukri_id,
+    });
+  } catch (err) {
+    console.error("❌ Failed to send merged payload to /candidates:", err);
+  }
+}
+
+async function sendCandidateProfileToCandidatesApi(profileData) {
+  try {
+    // Deprecated: keep for backward compatibility, but prefer merged flow.
+    const payload = mapProfileResponseToCandidatesPayload(profileData, null);
+
+    const res = await fetch(CANDIDATES_API_URL, {
+      method: "POST",
+      headers: {
+        accept: "*/*",
+        Authorization: CANDIDATES_BEARER_TOKEN,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const resultText = await res.text();
+    console.log("✅ Sent profile payload to /candidates:", {
+      status: res.status,
+      body: resultText,
+      naukri_unique_id: payload?.job_board_unique_ids?.naukri_unique_id,
+      naukri_id: payload?.job_board_unique_ids?.naukri_id,
+    });
+  } catch (err) {
+    console.error("❌ Failed to send profile payload to /candidates:", err);
   }
 }
 
