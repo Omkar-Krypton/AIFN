@@ -339,6 +339,24 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
     };
   });
 
+  const certifications = Array.isArray(profile?.certifications)
+    ? profile.certifications
+    : [];
+  const mappedCertifications = certifications.map((c) => {
+    const rawExpiry = c?.expiryDate || "";
+    const expiry =
+      rawExpiry && rawExpiry !== "00-0000" ? rawExpiry : null;
+
+    return {
+      name: c?.course || "",
+      issuing_organization: c?.certificationBody || c?.vendor || "",
+      issue_date: c?.issueDate || null,
+      expiry_date: expiry,
+      credential_id: c?.completionId || "",
+      url: c?.certificateUrl || "",
+    };
+  });
+
   const skillsList = [];
   keywords.forEach((k) => skillsList.push({ skill_name: k.trim(), category: null }));
   (profile?.skills || []).forEach((s) => {
@@ -434,7 +452,7 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
     skills: skillsList,
     languages: mappedLanguages,
     projects: mappedProjects,
-    certifications: [],
+    certifications: mappedCertifications,
     trainings: [],
     achievements: [],
     publications: [],
