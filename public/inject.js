@@ -1,5 +1,38 @@
 (function () {
   console.log("🚀 API Interceptor inject.js loaded");
+
+  function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      try {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const result = typeof reader.result === "string" ? reader.result : "";
+          // result is like: data:application/pdf;base64,JVBERi0x...
+          const commaIdx = result.indexOf(",");
+          resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+        };
+        reader.onerror = () => reject(reader.error || new Error("FileReader error"));
+        reader.readAsDataURL(blob);
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
+  function arrayBufferToBase64(buffer) {
+    try {
+      const bytes = new Uint8Array(buffer);
+      const chunkSize = 0x8000;
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+      }
+      return btoa(binary);
+    } catch (e) {
+      console.error("❌ Failed converting ArrayBuffer to base64", e);
+      return "";
+    }
+  }
   
   // FETCH
   const originalFetch = window.fetch;
@@ -22,9 +55,19 @@
         typeof url === "string" &&
         (url.includes("/jsprofile/download/resume") || url.includes("jsprofile/download/resume"));
 
-      // Resume API returns raw Base64 PDF (not JSON).
+      // Resume API can return:
+      // - raw base64 text, OR
+      // - application/pdf binary (blob/arraybuffer)
       if (isResumeApi) {
-        const cvBuffer = await clone.text();
+        let cvBuffer = "";
+
+        if (ct.toLowerCase().includes("application/pdf")) {
+          const blob = await clone.blob();
+          cvBuffer = await blobToBase64(blob);
+        } else {
+          // Some environments return the base64 directly as text.
+          cvBuffer = await clone.text();
+        }
 
         window.postMessage(
           {
@@ -86,7 +129,7 @@
       return originalOpen.apply(this, args);
     };
 
-    xhr.addEventListener("load", function () {
+    xhr.addEventListener("load", async function () {
       console.log("🔍 XHR load event fired for:", xhr.responseURL);
       console.log("📊 XHR Status:", xhr.status, "Ready State:", xhr.readyState);
       
@@ -100,7 +143,23 @@
             xhr.responseURL.includes("jsprofile/download/resume"));
 
         if (isResumeApi) {
-          const cvBuffer = xhr.responseText || "";
+          let cvBuffer = "";
+
+          if (xhr.responseType === "blob" && xhr.response instanceof Blob) {
+            cvBuffer = await blobToBase64(xhr.response);
+          } else if (xhr.responseType === "arraybuffer" && xhr.response) {
+            cvBuffer = arrayBufferToBase64(xhr.response);
+          } else {
+            // responseType is "" or "text"
+            cvBuffer = xhr.responseText || "";
+
+            // If the server sent binary PDF but responseType is text, this will be garbage.
+            // In that case, prefer response if it's a Blob (some browsers do this).
+            if (!cvBuffer && xhr.response instanceof Blob) {
+              cvBuffer = await blobToBase64(xhr.response);
+            }
+          }
+
           window.postMessage(
             {
               source: "API_INTERCEPTOR",
@@ -143,7 +202,13 @@
         }
       } catch (e) {
         console.error("❌ Error intercepting XHR:", xhr.responseURL, e);
-        console.error("Response text:", xhr.responseText?.substring(0, 200));
+        try {
+          if (typeof xhr.responseText === "string") {
+            console.error("Response text:", xhr.responseText.substring(0, 200));
+          }
+        } catch (_ignored) {
+          // xhr.responseText throws when responseType is blob/arraybuffer
+        }
       }
     });
 
