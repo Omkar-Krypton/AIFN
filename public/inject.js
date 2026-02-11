@@ -244,12 +244,18 @@
       const buttons = document.querySelectorAll("button");
       for (const button of buttons) {
         const text = (button.textContent || "").toLowerCase();
-        const ariaLabel = (button.querySelector("[aria-label]")?.getAttribute("aria-label") || "").toLowerCase();
+        // Some UIs put aria-label on the button itself, others on an inner div.
+        const ariaOnButton = (button.getAttribute("aria-label") || "").toLowerCase();
+        const ariaInside = (button.querySelector("[aria-label]")?.getAttribute("aria-label") || "").toLowerCase();
+        const ariaLabel = ariaOnButton || ariaInside;
+
+        const hasDownloadIcon = !!button.querySelector("i.naukri-icon-download");
 
         const isDownload =
           text.includes("download cv") ||
           text.includes("download resume") ||
-          ariaLabel.includes("download resume");
+          ariaLabel.includes("download resume") ||
+          hasDownloadIcon;
 
         if (isDownload && !button.hasAttribute("data-auto-clicked-resume")) {
           button.setAttribute("data-auto-clicked-resume", "true");
