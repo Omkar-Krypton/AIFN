@@ -6,6 +6,8 @@ const CANDIDATES_API_URL = "http://localhost:2000/candidates";
 const CANDIDATES_BEARER_TOKEN =
   "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjlkZDQ2ZWFlLTJiMjItNDA0Yy1iNGE0LTFjMWM3M2I5Y2E0YyIsImVtYWlsIjoiYmh1bWlrYUBwbGFjb25oci5jb20iLCJyb2xlIjoidXNlciIsImlzQWN0aXZlIjp0cnVlLCJmdWxsTmFtZSI6IkJodW1pa2EgS290aGFyaSIsIm1vYmlsZSI6IjEyMzQ1Njc4OTAiLCJsb2NhdGlvbiI6IkFobWVkYWJhZCIsImN1c3RvbWVySWQiOiI4ZDJmNDBhYy05OWJhLTQ5NGMtYjViNS0yOGJkYzM0YjQ1NjgiLCJpYXQiOjE3NzA3MzkzMDYsImV4cCI6MTkyODUyNzMwNn0.9pGc5sw6gjMy4C8gWJZusRg23bJSBIowapnZtnZVb3Q";
 
+const UPLOAD_RESUME_API_URL = "http://localhost:2000/candidates/upload-resume";
+
 let lastListingSignature = null;
 
 // Profile page (preview) needs 2 API responses before sending /candidates:
@@ -14,6 +16,10 @@ let lastListingSignature = null;
 const profileByUserId = new Map(); // userId -> profile response
 const contactByUserId = new Map(); // userId -> contactdetails response
 const lastSentCandidatesSignatureByUserId = new Map(); // userId -> signature
+
+// Used for resume upload correlation (resume API doesn't include IDs reliably).
+let latestPreviewUserId = null;
+let latestPreviewUniqueId = null;
 
 chrome.runtime.onMessage.addListener((msg) => {
   console.log("🔔 Background received message:", msg?.url);
@@ -41,12 +47,34 @@ chrome.runtime.onMessage.addListener((msg) => {
   const isJsProfileApi = isRecruiterJsProfileService && isPreviewPage;
   const isContactDetailsOnPreview = isContactDetailsApi && isPreviewPage;
 
-  const isResumeApi = typeof msg.url === "string" && msg.url.includes("download/resume");
+  const isResumeApi =
+    typeof msg.url === "string" &&
+    (msg.url.includes("/jsprofile/download/resume") || msg.url.includes("jsprofile/download/resume"));
   const isListingPage = typeof msg.pathname === "string" && msg.pathname.includes("search");
   const hasTuples = Array.isArray(msg?.data?.tuples);
 
   if (isListingPage && hasTuples) {
     return sendListingCandidatesData(msg.data);
+  }
+
+  if (isResumeApi) {
+    const cvBuffer = typeof msg?.data?.cvBuffer === "string" ? msg.data.cvBuffer : "";
+    if (!cvBuffer) {
+      console.log("⏭️  Resume API detected but cvBuffer missing");
+      return;
+    }
+
+    const candidate_id = latestPreviewUniqueId || latestPreviewUserId;
+    if (!candidate_id) {
+      console.log("⏳ Resume captured but no candidate_id available yet");
+      return;
+    }
+
+    return uploadResume({
+      candidate_id,
+      cvBuffer,
+      cv_updated_at: new Date().toISOString(),
+    });
   }
 
   if (isContactDetailsOnPreview) {
@@ -56,6 +84,7 @@ chrome.runtime.onMessage.addListener((msg) => {
       return;
     }
 
+    latestPreviewUserId = String(userId);
     contactByUserId.set(String(userId), msg.data);
     console.log("✅ CONTACT DETAILS FOUND (background):", {
       userId,
@@ -77,12 +106,36 @@ chrome.runtime.onMessage.addListener((msg) => {
 
   const profileUserId = msg?.data?.userId;
   if (profileUserId) {
+    latestPreviewUserId = String(profileUserId);
+    latestPreviewUniqueId = msg?.data?.uniqueId ? String(msg.data.uniqueId) : latestPreviewUniqueId;
     profileByUserId.set(String(profileUserId), msg.data);
     return maybeSendCombinedCandidateToCandidatesApi(String(profileUserId));
   }
 
   console.log("⏭️  Profile response missing userId, cannot merge with contacts");
 });
+
+async function uploadResume(data) {
+  try {
+    const res = await fetch(UPLOAD_RESUME_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        accept: "*/*",
+      },
+      body: JSON.stringify(data),
+    });
+
+    const resultText = await res.text();
+    console.log("✅ Uploaded resume to backend:", {
+      status: res.status,
+      body: resultText,
+      candidate_id: data?.candidate_id,
+    });
+  } catch (err) {
+    console.error("❌ Failed to upload resume:", err);
+  }
+}
 
 async function sendCandidateData(data) {
   try {
