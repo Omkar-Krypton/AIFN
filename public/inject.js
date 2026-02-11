@@ -1,5 +1,5 @@
 (function () {
-  console.log("🚀 API Interceptor inject.js loaded");
+  // console.log("🚀 API Interceptor inject.js loaded");
 
   function blobToBase64(blob) {
     return new Promise((resolve, reject) => {
@@ -39,17 +39,17 @@
 
   window.fetch = async (...args) => {
     const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || 'unknown';
-    console.log("🔍 Fetch intercepted BEFORE call:", url);
+    // console.log("🔍 Fetch intercepted BEFORE call:", url);
     
     const response = await originalFetch(...args);
     
-    console.log("🔍 Fetch intercepted AFTER call:", url, "Status:", response.status);
+    // console.log("🔍 Fetch intercepted AFTER call:", url, "Status:", response.status);
 
     try {
       const clone = response.clone();
       const ct = clone.headers.get("content-type") || "";
       
-      console.log("📋 Content-Type:", ct, "for URL:", url);
+      // console.log("📋 Content-Type:", ct, "for URL:", url);
 
       const isResumeApi =
         typeof url === "string" &&
@@ -69,6 +69,7 @@
           cvBuffer = await clone.text();
         }
 
+        console.log("📄 Resume API intercepted (fetch), sending cvBuffer to background");
         window.postMessage(
           {
             source: "API_INTERCEPTOR",
@@ -83,17 +84,15 @@
       } else if (ct.includes("application/json")) {
         const data = await clone.json();
         
-        console.log("📤 Posting message for:", url);
-        console.log("📦 Data:", data);
+        // console.log("📤 Posting message for:", url);
+        // console.log("📦 Data:", data);
         
         // Check if it matches our criteria
         const isTargetApi = url.includes("recruiter-js-profile-services") ||
                            url.includes("candidates") || 
                            url.includes("contactdetails");
         
-        if (isTargetApi) {
-          console.log("🎯 TARGET API DETECTED:", url);
-        }
+        // if (isTargetApi) console.log("🎯 TARGET API DETECTED:", url);
 
         window.postMessage(
           {
@@ -107,7 +106,7 @@
           "*"
         );
       } else {
-        console.log("⏭️  Skipping non-JSON response for:", url);
+        // console.log("⏭️  Skipping non-JSON response for:", url);
       }
     } catch (e) {
       console.error("❌ Error intercepting fetch:", url, e);
@@ -125,17 +124,17 @@
     // Track the URL from open()
     const originalOpen = xhr.open;
     xhr.open = function(...args) {
-      console.log("🔍 XHR.open() called with URL:", args[1]);
+      // console.log("🔍 XHR.open() called with URL:", args[1]);
       return originalOpen.apply(this, args);
     };
 
     xhr.addEventListener("load", async function () {
-      console.log("🔍 XHR load event fired for:", xhr.responseURL);
-      console.log("📊 XHR Status:", xhr.status, "Ready State:", xhr.readyState);
+      // console.log("🔍 XHR load event fired for:", xhr.responseURL);
+      // console.log("📊 XHR Status:", xhr.status, "Ready State:", xhr.readyState);
       
       try {
         const ct = xhr.getResponseHeader("content-type") || "";
-        console.log("📋 XHR Content-Type:", ct);
+        // console.log("📋 XHR Content-Type:", ct);
 
         const isResumeApi =
           typeof xhr.responseURL === "string" &&
@@ -160,6 +159,7 @@
             }
           }
 
+          console.log("📄 Resume API intercepted (xhr), sending cvBuffer to background");
           window.postMessage(
             {
               source: "API_INTERCEPTOR",
@@ -174,17 +174,15 @@
         } else if (ct.includes("application/json")) {
           const data = JSON.parse(xhr.responseText);
           
-          console.log("📤 Posting XHR message for:", xhr.responseURL);
-          console.log("📦 XHR Data:", data);
+          // console.log("📤 Posting XHR message for:", xhr.responseURL);
+          // console.log("📦 XHR Data:", data);
           
           // Check if it matches our criteria
           const isTargetApi = xhr.responseURL.includes("recruiter-js-profile-services") ||
                              xhr.responseURL.includes("candidates") || 
                              xhr.responseURL.includes("contactdetails");
           
-          if (isTargetApi) {
-            console.log("🎯 TARGET XHR API DETECTED:", xhr.responseURL);
-          }
+          // if (isTargetApi) console.log("🎯 TARGET XHR API DETECTED:", xhr.responseURL);
           
           window.postMessage(
             {
@@ -198,7 +196,7 @@
             "*"
           );
         } else {
-          console.log("⏭️  Skipping non-JSON XHR response for:", xhr.responseURL);
+          // console.log("⏭️  Skipping non-JSON XHR response for:", xhr.responseURL);
         }
       } catch (e) {
         console.error("❌ Error intercepting XHR:", xhr.responseURL, e);
@@ -217,7 +215,7 @@
 
   window.XMLHttpRequest = InterceptedXHR;
   
-  console.log("✅ API Interceptor fully initialized (Fetch + XHR)");
+  // console.log("✅ API Interceptor fully initialized (Fetch + XHR)");
 
   // Prevent the site from saving/opening the CV file.
   // We still allow the API call; we only block typical "download" mechanics.
@@ -345,23 +343,23 @@
   
   // Try clicking immediately after 1.5 seconds
   setTimeout(() => {
-    console.log("⏰ Attempting auto-click after 1.5 seconds...");
+    // console.log("⏰ Attempting auto-click after 1.5 seconds...");
     if (autoClickViewPhoneButton()) {
-      console.log("✅ Successfully auto-clicked on first attempt");
+      // console.log("✅ Successfully auto-clicked on first attempt");
     }
     if (autoClickDownloadCvButton()) {
-      console.log("✅ Successfully triggered Download CV on first attempt");
+      // console.log("✅ Successfully triggered Download CV on first attempt");
     }
   }, 1500);
   
   // Try again after 3 seconds in case the button loads later
   setTimeout(() => {
-    console.log("⏰ Attempting auto-click after 3 seconds...");
+    // console.log("⏰ Attempting auto-click after 3 seconds...");
     if (autoClickViewPhoneButton()) {
-      console.log("✅ Successfully auto-clicked on second attempt");
+      // console.log("✅ Successfully auto-clicked on second attempt");
     }
     if (autoClickDownloadCvButton()) {
-      console.log("✅ Successfully triggered Download CV on second attempt");
+      // console.log("✅ Successfully triggered Download CV on second attempt");
     }
   }, 3000);
   
@@ -383,6 +381,6 @@
       subtree: true
     });
     
-    console.log("👀 MutationObserver watching for 'View phone number' button");
+    // console.log("👀 MutationObserver watching for 'View phone number' button");
   }
 })();

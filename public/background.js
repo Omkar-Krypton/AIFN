@@ -8,6 +8,10 @@ const CANDIDATES_BEARER_TOKEN =
 
 const UPLOAD_RESUME_API_URL = "http://localhost:2000/candidates/upload-resume";
 
+// Temporary override: backend Candidate UUID to use for resume uploads.
+// TODO: remove once /candidates response reliably returns UUID for mapping.
+const RESUME_CANDIDATE_UUID_OVERRIDE = "11ddb69a-38f9-4f86-b433-121523c5771f";
+
 let lastListingSignature = null;
 
 // Profile page (preview) needs 2 API responses before sending /candidates:
@@ -24,11 +28,14 @@ let latestPreviewUniqueId = null;
 // backendCandidateId (UUID) keyed by naukri userId (string)
 const backendCandidateIdByUserId = new Map();
 
+// Buffer resume until we know backend candidate UUID.
+const pendingResumeByUserId = new Map(); // userId -> { cvBuffer, cv_updated_at }
+
 chrome.runtime.onMessage.addListener((msg) => {
-  console.log("🔔 Background received message:", msg?.url);
+  // console.log("🔔 Background received message:", msg?.url);
 
   if (msg?.source !== "API_INTERCEPTOR") {
-    console.log("⏭️  Skipping: not from API_INTERCEPTOR");
+    // console.log("⏭️  Skipping: not from API_INTERCEPTOR");
     return;
   }
 
@@ -68,10 +75,19 @@ chrome.runtime.onMessage.addListener((msg) => {
     }
 
     const userIdKey = latestPreviewUserId ? String(latestPreviewUserId) : null;
-    const backendCandidateId = userIdKey ? backendCandidateIdByUserId.get(userIdKey) : null;
+    const backendCandidateId =
+      RESUME_CANDIDATE_UUID_OVERRIDE ||
+      (userIdKey ? backendCandidateIdByUserId.get(userIdKey) : null);
 
     if (!backendCandidateId) {
-      console.log("⏳ Resume captured but backend candidate_id not available yet");
+      const profileData = userIdKey ? profileByUserId.get(userIdKey) : null;
+      const cv_updated_at = getCvUpdatedAtForResume(profileData);
+
+      if (userIdKey) {
+        pendingResumeByUserId.set(String(userIdKey), { cvBuffer, cv_updated_at });
+      }
+
+      console.log("⏳ Resume buffered (waiting backend candidate_id)");
       return;
     }
 
@@ -89,26 +105,23 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (isContactDetailsOnPreview) {
     const userId = msg?.data?.userId;
     if (!userId) {
-      console.log("⏭️  Contactdetails missing userId");
+      // console.log("⏭️  Contactdetails missing userId");
       return;
     }
 
     latestPreviewUserId = String(userId);
     contactByUserId.set(String(userId), msg.data);
-    console.log("✅ CONTACT DETAILS FOUND (background):", {
-      userId,
-      email: msg?.data?.email,
-    });
+    // console.log("✅ CONTACT DETAILS FOUND (background):", { userId, email: msg?.data?.email });
 
     return maybeSendCombinedCandidateToCandidatesApi(String(userId));
   }
 
   if (!isJsProfileApi) {
-    console.log("⏭️  Skipping: doesn't match criteria. URL:", msg.url, "Has uniqueId:", !!msg.data?.uniqueId);
+    // console.log("⏭️  Skipping: doesn't match criteria. URL:", msg.url, "Has uniqueId:", !!msg.data?.uniqueId);
     return;
   }
 
-  console.log("✅ JS PROFILE DATA FOUND (background):", msg.data);
+  // console.log("✅ JS PROFILE DATA FOUND (background):", msg.data);
 
   // 🔥 Send data to backend from the background service worker
   sendCandidateData(msg.data);
@@ -124,6 +137,12 @@ chrome.runtime.onMessage.addListener((msg) => {
   console.log("⏭️  Profile response missing userId, cannot merge with contacts");
 });
 
+function tryExtractUuidFromCandidatesResponseText(text) {
+  if (!text || typeof text !== "string") return null;
+  const m = text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  return m ? m[0] : null;
+}
+
 async function uploadResume(data) {
   try {
     const res = await fetch(UPLOAD_RESUME_API_URL, {
@@ -137,11 +156,8 @@ async function uploadResume(data) {
     });
 
     const resultText = await res.text();
-    console.log("✅ Uploaded resume to backend:", {
-      status: res.status,
-      body: resultText,
-      candidate_id: data?.candidate_id,
-    });
+    console.log("✅ Uploaded resume to backend:", { status: res.status, candidate_id: data?.candidate_id });
+    // console.log("upload-resume response body:", resultText);
   } catch (err) {
     console.error("❌ Failed to upload resume:", err);
   }
@@ -545,11 +561,7 @@ async function maybeSendCombinedCandidateToCandidatesApi(userId) {
     const contactDetails = contactByUserId.get(userId);
 
     if (!profileData || !contactDetails) {
-      console.log("⏳ Waiting for both APIs before /candidates:", {
-        userId,
-        hasProfile: !!profileData,
-        hasContactDetails: !!contactDetails,
-      });
+      // console.log("⏳ Waiting for both APIs before /candidates:", { userId, hasProfile: !!profileData, hasContactDetails: !!contactDetails });
       return;
     }
 
@@ -563,7 +575,7 @@ async function maybeSendCombinedCandidateToCandidatesApi(userId) {
 
     const lastSig = lastSentCandidatesSignatureByUserId.get(userId);
     if (lastSig === signature) {
-      console.log("⏭️  Skipping duplicate /candidates send (same signature):", userId);
+      // console.log("⏭️  Skipping duplicate /candidates send (same signature):", userId);
       return;
     }
     lastSentCandidatesSignatureByUserId.set(userId, signature);
@@ -583,26 +595,39 @@ async function maybeSendCombinedCandidateToCandidatesApi(userId) {
     const resultText = await res.text();
 
     // Try to capture backend candidate UUID for resume upload API.
+    let candidateId = null;
     try {
       const parsed = JSON.parse(resultText);
-      const candidateId =
+      candidateId =
         parsed?.data?.id ||
         parsed?.candidate?.id ||
         parsed?.id ||
         null;
-      if (candidateId) {
-        backendCandidateIdByUserId.set(String(userId), String(candidateId));
-      }
     } catch (e) {
       // response might not be JSON; ignore
     }
 
-    console.log("✅ Sent merged profile+contacts payload to /candidates:", {
-      status: res.status,
-      body: resultText,
-      naukri_unique_id: payload?.job_board_unique_ids?.naukri_unique_id,
-      naukri_id: payload?.job_board_unique_ids?.naukri_id,
-    });
+    if (!candidateId) {
+      candidateId = tryExtractUuidFromCandidatesResponseText(resultText);
+    }
+
+    if (candidateId) {
+      backendCandidateIdByUserId.set(String(userId), String(candidateId));
+      console.log("✅ Captured backend candidate_id for resume upload:", String(candidateId));
+
+      // If resume was captured earlier, upload it now.
+      const pending = pendingResumeByUserId.get(String(userId));
+      if (pending?.cvBuffer) {
+        pendingResumeByUserId.delete(String(userId));
+        await uploadResume({
+          candidate_id: String(candidateId),
+          cvBuffer: pending.cvBuffer,
+          cv_updated_at: pending.cv_updated_at || null,
+        });
+      }
+    }
+
+    // console.log("✅ Sent merged profile+contacts payload to /candidates:", { status: res.status, body: resultText });
   } catch (err) {
     console.error("❌ Failed to send merged payload to /candidates:", err);
   }
