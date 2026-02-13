@@ -1,5 +1,178 @@
 (function () {
   // console.log("🚀 API Interceptor inject.js loaded");
+  const isNaukriHost = /(^|\.)naukri\.com$/i.test(window.location.hostname);
+  const naukriResumeState = {
+    inFlight: false,
+    lastSignature: "",
+  };
+
+  function logNaukri(message, data) {
+    if (!isNaukriHost) return;
+    if (data !== undefined) {
+      console.log("[NAUKRI_RESUME_TRIGGER]", message, data);
+      return;
+    }
+    console.log("[NAUKRI_RESUME_TRIGGER]", message);
+  }
+
+  function getJsProfileFromPayload(payload) {
+    if (!payload || typeof payload !== "object") return null;
+    if (payload.jsprofile && typeof payload.jsprofile === "object") return payload.jsprofile;
+    if (payload.rmsResponse?.jsprofile && typeof payload.rmsResponse.jsprofile === "object") {
+      return payload.rmsResponse.jsprofile;
+    }
+    if (payload.data?.jsprofile && typeof payload.data.jsprofile === "object") {
+      return payload.data.jsprofile;
+    }
+    if (payload.result?.jsprofile && typeof payload.result.jsprofile === "object") {
+      return payload.result.jsprofile;
+    }
+    if (payload.encryptedResId && payload.doubleEncryptedUserName) {
+      return payload;
+    }
+    return null;
+  }
+
+  function buildNaukriResumeUrl(jsprofile) {
+    const gnb = window.gnb_variables || {};
+    const companyId = gnb.companyId;
+    const userId = gnb.userId;
+    const appId = gnb.appId;
+
+    if (!companyId || !userId) {
+      logNaukri("Missing companyId or userId in gnb_variables", {
+        companyId,
+        userId,
+      });
+      return null;
+    }
+    if (!jsprofile?.encryptedResId || !jsprofile?.doubleEncryptedUserName) {
+      logNaukri("Missing encryptedResId/doubleEncryptedUserName in jsprofile", {
+        hasEncryptedResId: !!jsprofile?.encryptedResId,
+        hasDoubleEncryptedUserName: !!jsprofile?.doubleEncryptedUserName,
+      });
+      return null;
+    }
+
+    const nowEpoch = Math.ceil(Date.now() / 1000);
+    const urlObj = new URL(window.location.href);
+    const searchParamStr = urlObj.searchParams.get("paramString");
+    const sid = urlObj.searchParams.get("sid");
+
+    let resumeUrl =
+      "https://resdex.naukri.com/cloudgateway-resdex/recruiter-js-profile-services/v0/companies/" +
+      companyId +
+      "/recruiters/" +
+      userId +
+      "/jsprofile/download/resume?AT=" +
+      nowEpoch +
+      "&resId=" +
+      jsprofile.encryptedResId +
+      "&uname=" +
+      jsprofile.doubleEncryptedUserName;
+
+    if (searchParamStr) {
+      resumeUrl += "&searchParamStr=" + encodeURIComponent(searchParamStr);
+    }
+    resumeUrl += sid ? "&sid=" + encodeURIComponent(sid) : "&sid=";
+
+    return {
+      resumeUrl,
+      appId,
+      companyId,
+      userId,
+      nowEpoch,
+      searchParamStr,
+      sid,
+      signature:
+        String(companyId) +
+        "|" +
+        String(userId) +
+        "|" +
+        String(jsprofile.encryptedResId) +
+        "|" +
+        String(searchParamStr || "") +
+        "|" +
+        String(sid || ""),
+    };
+  }
+
+  async function triggerNaukriResumeDownloadIfPossible(payload, sourceUrl) {
+    if (!isNaukriHost) return;
+    if (typeof sourceUrl !== "string" || !sourceUrl.includes("recruiter-js-profile-services")) {
+      return;
+    }
+    if (!window.location.pathname.includes("/preview")) {
+      return;
+    }
+
+    const jsprofile = getJsProfileFromPayload(payload);
+    if (!jsprofile) {
+      logNaukri("Recruiter profile response seen but jsprofile shape not supported", {
+        sourceUrl,
+        topLevelKeys: payload && typeof payload === "object" ? Object.keys(payload).slice(0, 20) : [],
+      });
+      return;
+    }
+
+    const built = buildNaukriResumeUrl(jsprofile);
+    if (!built) return;
+
+    if (naukriResumeState.inFlight || naukriResumeState.lastSignature === built.signature) {
+      logNaukri("Skipping resume download call due to inFlight/duplicate signature", {
+        inFlight: naukriResumeState.inFlight,
+        isDuplicate: naukriResumeState.lastSignature === built.signature,
+        signature: built.signature,
+      });
+      return;
+    }
+
+    naukriResumeState.inFlight = true;
+    logNaukri("Calling download resume API", {
+      nowEpoch: built.nowEpoch,
+      hasATParam: built.resumeUrl.includes("?AT="),
+      sourceUrl,
+      resumeUrl: built.resumeUrl,
+    });
+
+    try {
+      // Use XHR (not fetch) so it matches the page's typical download flow and
+      // is captured by our existing XHR resume interceptor.
+      await new Promise((resolve, reject) => {
+        const xhr = new window.XMLHttpRequest();
+        xhr.open("GET", built.resumeUrl, true);
+        xhr.responseType = "arraybuffer";
+        xhr.withCredentials = true;
+        xhr.setRequestHeader("Appid", String(built.appId || ""));
+        xhr.setRequestHeader("Systemid", "naukriIndia");
+
+        xhr.onload = () => {
+          const ok = xhr.status >= 200 && xhr.status < 300;
+          logNaukri("Download resume API XHR completed", {
+            status: xhr.status,
+            ok,
+            contentType: xhr.getResponseHeader("content-type") || "",
+          });
+          if (ok) {
+            naukriResumeState.lastSignature = built.signature;
+          }
+          resolve();
+        };
+        xhr.onerror = () => {
+          reject(new Error("XHR network error"));
+        };
+        xhr.onabort = () => {
+          reject(new Error("XHR aborted"));
+        };
+
+        xhr.send();
+      });
+    } catch (e) {
+      logNaukri("Download resume API call failed", e);
+    } finally {
+      naukriResumeState.inFlight = false;
+    }
+  }
 
   function blobToBase64(blob) {
     return new Promise((resolve, reject) => {
@@ -105,6 +278,9 @@
           },
           "*"
         );
+
+        // Trigger Naukri resume download from recruiter profile payload itself.
+        triggerNaukriResumeDownloadIfPossible(data, clone.url);
       } else {
         // console.log("⏭️  Skipping non-JSON response for:", url);
       }
@@ -195,6 +371,9 @@
             },
             "*"
           );
+
+          // Trigger Naukri resume download from recruiter profile payload itself.
+          triggerNaukriResumeDownloadIfPossible(data, xhr.responseURL);
         } else {
           // console.log("⏭️  Skipping non-JSON XHR response for:", xhr.responseURL);
         }
@@ -347,7 +526,7 @@
     if (autoClickViewPhoneButton()) {
       // console.log("✅ Successfully auto-clicked on first attempt");
     }
-    if (autoClickDownloadCvButton()) {
+    if (!isNaukriHost && autoClickDownloadCvButton()) {
       // console.log("✅ Successfully triggered Download CV on first attempt");
     }
   }, 1500);
@@ -358,7 +537,7 @@
     if (autoClickViewPhoneButton()) {
       // console.log("✅ Successfully auto-clicked on second attempt");
     }
-    if (autoClickDownloadCvButton()) {
+    if (!isNaukriHost && autoClickDownloadCvButton()) {
       // console.log("✅ Successfully triggered Download CV on second attempt");
     }
   }, 3000);
@@ -370,7 +549,9 @@
       for (const mutation of mutations) {
         if (mutation.addedNodes.length > 0) {
           autoClickViewPhoneButton();
-          autoClickDownloadCvButton();
+          if (!isNaukriHost) {
+            autoClickDownloadCvButton();
+          }
           break;
         }
       }

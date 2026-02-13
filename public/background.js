@@ -8,9 +8,8 @@ const CANDIDATES_BEARER_TOKEN =
 
 const UPLOAD_RESUME_API_URL = "http://localhost:2000/candidates/upload-resume";
 
-// Temporary override: backend Candidate UUID to use for resume uploads.
-// TODO: remove once /candidates response reliably returns UUID for mapping.
-const RESUME_CANDIDATE_UUID_OVERRIDE = "11ddb69a-38f9-4f86-b433-121523c5771f";
+// Resume uploads must use the backend UUID returned by POST /candidates.
+// We buffer resumes until that UUID is known.
 
 let lastListingSignature = null;
 
@@ -75,9 +74,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     }
 
     const userIdKey = latestPreviewUserId ? String(latestPreviewUserId) : null;
-    const backendCandidateId =
-      RESUME_CANDIDATE_UUID_OVERRIDE ||
-      (userIdKey ? backendCandidateIdByUserId.get(userIdKey) : null);
+    const backendCandidateId = userIdKey ? backendCandidateIdByUserId.get(userIdKey) : null;
 
     if (!backendCandidateId) {
       const profileData = userIdKey ? profileByUserId.get(userIdKey) : null;
@@ -599,6 +596,10 @@ async function maybeSendCombinedCandidateToCandidatesApi(userId) {
     try {
       const parsed = JSON.parse(resultText);
       candidateId =
+        // Current backend shape:
+        // { status, message, data: { success, data: { profile: { id } } } }
+        parsed?.data?.data?.profile?.id ||
+        parsed?.data?.profile?.id ||
         parsed?.data?.id ||
         parsed?.candidate?.id ||
         parsed?.id ||

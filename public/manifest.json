@@ -5,6 +5,12 @@
   "host_permissions": ["<all_urls>"],
   "content_scripts": [
     {
+      "matches": ["https://*.naukri.com/*"],
+      "js": ["js/inject_naukri.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
       "matches": ["<all_urls>"],
       "js": ["contentScript.js"],
       "run_at": "document_start"
