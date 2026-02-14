@@ -480,94 +480,35 @@
     }
   }
 
-  // 🔥 AUTO-CLICK "Download CV" button to trigger resume API (without saving file)
-  //this also unused for the NJ it is back up for future use if needed
-  function autoClickDownloadCvButton() {
-    try {
-      // ✅ Route guard: only run on preview pages
-      if (!window.location.pathname.includes('/preview')) {
-        return false;
+  // New sequencing requirement:
+  // jsprofile (page load) -> wait random 1-2s -> click phone -> wait random 1-2s -> fetch resume (handled by inject_naukri.js).
+  //
+  // So inject.js does NOT auto-click on its own. It only clicks when asked by contentScript.js.
+  function requestClickPhoneWithRetries() {
+    if (autoClickViewPhoneButton()) return;
+
+    let attempts = 0;
+    const t = setInterval(() => {
+      attempts += 1;
+      if (autoClickViewPhoneButton() || attempts >= 6) {
+        clearInterval(t);
       }
+    }, 400);
 
-      const buttons = document.querySelectorAll("button");
-      for (const button of buttons) {
-        const text = (button.textContent || "").toLowerCase();
-        // Some UIs put aria-label on the button itself, others on an inner div.
-        const ariaOnButton = (button.getAttribute("aria-label") || "").toLowerCase();
-        const ariaInside = (button.querySelector("[aria-label]")?.getAttribute("aria-label") || "").toLowerCase();
-        const ariaLabel = ariaOnButton || ariaInside;
-
-        const hasDownloadIcon = !!button.querySelector("i.naukri-icon-download");
-
-        const isDownload =
-          text.includes("download cv") ||
-          text.includes("download resume") ||
-          ariaLabel.includes("download resume") ||
-          hasDownloadIcon;
-
-        if (isDownload && !button.hasAttribute("data-auto-clicked-resume")) {
-          button.setAttribute("data-auto-clicked-resume", "true");
-
-          installCvDownloadBlocker();
-          // Only block downloads briefly; still allow normal page actions afterward.
-          window.__api_interceptor_block_downloads_until = Date.now() + 15000;
-
-          console.log("🎯 Found 'Download CV' button:", button);
-          console.log("🖱️  Auto-clicking Download CV button to trigger resume API...");
-          button.click();
-          return true;
-        }
-      }
-
-      return false;
-    } catch (e) {
-      console.error("❌ Error auto-clicking Download CV button:", e);
-      return false;
+    if (document.body) {
+      const obs = new MutationObserver(() => {
+        if (autoClickViewPhoneButton()) obs.disconnect();
+      });
+      obs.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => obs.disconnect(), 5000);
     }
   }
 
-  // Try clicking immediately after 1.5 seconds
-  setTimeout(() => {
-    // console.log("⏰ Attempting auto-click after 1.5 seconds...");
-    if (autoClickViewPhoneButton()) {
-      // console.log("✅ Successfully auto-clicked on first attempt");
+  window.addEventListener("message", (event) => {
+    if (event.source !== window) return;
+    const data = event.data || {};
+    if (data.source === "AIFN_EXTENSION" && data.type === "CLICK_VIEW_PHONE") {
+      requestClickPhoneWithRetries();
     }
-    if (!isNaukriHost && autoClickDownloadCvButton()) {
-      // console.log("✅ Successfully triggered Download CV on first attempt");
-    }
-  }, 1500);
-
-  // Try again after 3 seconds in case the button loads later
-  setTimeout(() => {
-    // console.log("⏰ Attempting auto-click after 3 seconds...");
-    if (autoClickViewPhoneButton()) {
-      // console.log("✅ Successfully auto-clicked on second attempt");
-    }
-    if (!isNaukriHost && autoClickDownloadCvButton()) {
-      // console.log("✅ Successfully triggered Download CV on second attempt");
-    }
-  }, 3000);
-
-  // Watch for DOM changes to catch dynamically loaded buttons
-  if (document.body) {
-    const observer = new MutationObserver((mutations) => {
-      // Only try if we see button-related changes
-      for (const mutation of mutations) {
-        if (mutation.addedNodes.length > 0) {
-          autoClickViewPhoneButton();
-          if (!isNaukriHost) {
-            autoClickDownloadCvButton();
-          }
-          break;
-        }
-      }
-    });
-
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true
-    });
-
-    // console.log("👀 MutationObserver watching for 'View phone number' button");
-  }
+  });
 })();
