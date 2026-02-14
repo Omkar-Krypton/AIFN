@@ -300,13 +300,6 @@
   function InterceptedXHR() {
     const xhr = new OriginalXHR();
 
-    // Track the URL from open()
-    const originalOpen = xhr.open;
-    xhr.open = function (...args) {
-      // console.log("🔍 XHR.open() called with URL:", args[1]);
-      return originalOpen.apply(this, args);
-    };
-
     xhr.addEventListener("load", async function () {
       // console.log("🔍 XHR load event fired for:", xhr.responseURL);
       // console.log("📊 XHR Status:", xhr.status, "Ready State:", xhr.readyState);
