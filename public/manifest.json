@@ -2,6 +2,15 @@
   "manifest_version": 3,
   "name": "Read-Only API Interceptor",
   "version": "1.0",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "storage",
+    "cookies",
+    "scripting",
+    "browsingData",
+    "notifications"
+  ],
   "host_permissions": ["<all_urls>"],
   "content_scripts": [
     {
@@ -14,6 +23,25 @@
       "matches": ["<all_urls>"],
       "js": ["contentScript.js"],
       "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "*://*.shine.com/*",
+        "*://shine.com/*",
+        "*://recruiter.shine.com/*",
+        "*://*.recruiter.shine.com/*"
+      ],
+      "js": [
+        "content/utils/messaging.js",
+        "content/utils/dom.js",
+        "content/utils/contentScript.js",
+        "content/sjb/support.js",
+        "content/sjb/converter.js",
+        "content/sjb/tools.js",
+        "content/sjb/extractor.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
     }
   ],
   "web_accessible_resources": [
@@ -23,7 +51,8 @@
     }
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "action": {
     "default_popup": "index.html"
