@@ -125,6 +125,49 @@ function freezeTabForRateLimit(tabId, limitInfo) {
     });
 }
 
+function toNumberOrUndefined(v) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function shouldFreezeForRateLimit(result) {
+  // Only freeze for true limit blocks. Treat 0/0 or missing limits as API/unauthed noise.
+  if (!result || result.canScrape !== false) return false;
+
+  const reason = typeof result.reason === "string" ? result.reason : "";
+  const neverFreezeReasons = new Set([
+    "NO_AUTH_TOKEN",
+    "API_ERROR",
+    "ERROR",
+    "INVALID_TOKEN",
+    "NO_USER_ID",
+    "NO_CUSTOMER_ID",
+    "SKIP_HOST",
+    "SKIP_SHINE_PATH",
+    "SKIP_RESTDEX_PATH",
+  ]);
+  if (neverFreezeReasons.has(reason)) return false;
+
+  const maxLimit = toNumberOrUndefined(result.maxLimit);
+  const used = toNumberOrUndefined(result.used);
+  const remaining = toNumberOrUndefined(result.remaining);
+
+  // If backend didn't provide a real limit (0/0), do not freeze.
+  if (!maxLimit || maxLimit <= 0) return false;
+  if (used === 0 && remaining === 0) return false;
+
+  // If explicit "exceeded" signal exists, freeze.
+  const isExceededReason =
+    reason === "DAILY_LIMIT_EXCEEDED" || reason === "WEEKLY_LIMIT_EXCEEDED" || reason === "MONTHLY_LIMIT_EXCEEDED";
+  if (isExceededReason) return true;
+
+  // Otherwise, use numeric inference if provided.
+  if (typeof remaining === "number") return remaining <= 0;
+  if (typeof used === "number") return used >= maxLimit;
+
+  return false;
+}
+
 async function getCachedOrFetchRateLimit(jobBoard) {
   const now = Date.now();
   const cacheKey = jobBoard || "default";
@@ -204,14 +247,15 @@ export function handleCheckCanScrape(message, sender, sendResponse) {
       const { jobBoard } = message;
       const result = await getCachedOrFetchRateLimit(jobBoard);
 
-      if (!result.canScrape && result.reason !== "NO_AUTH_TOKEN" && sender.tab?.id) {
+      if (sender.tab?.id && shouldFreezeForRateLimit(result)) {
         freezeTabForRateLimit(sender.tab.id, result);
       }
 
       sendResponse(result);
     } catch (error) {
       console.error("[Rate Limit] Error in handleCheckCanScrape:", error);
-      sendResponse({ canScrape: false, reason: "API_ERROR", maxLimit: 0, used: 0, remaining: 0 });
+      // If API fails, do not freeze the page.
+      sendResponse({ canScrape: true, reason: "API_ERROR", maxLimit: 0, used: 0, remaining: 0 });
     }
   })();
 

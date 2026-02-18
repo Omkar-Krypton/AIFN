@@ -1,5 +1,13 @@
 import { getStoredAuth } from "./core/auth.js";
-import { ETICA_EXT_URL } from "./config/constants.js";
+import { ETICA_EXT_URL, PROFILE_API_URL, WEB_APP_URL } from "./config/constants.js";
+import {
+  extractNhIdsFromPathname,
+  extractApplicationIdFromNhUrl,
+  isNhApplicationDetailApi,
+  isNhContactDetailsApi,
+  isNhResumeDownloadApi,
+} from "./background/njp/ids.js";
+import { extractCvUpdatedAtFromNhApplication } from "./background/njp/payload.js";
 import { handleSjbProfile, handleSjbUpdateResume, handleCheckSjbIds } from "./background/sjb/handlers.js";
 import { handleCheckCanScrape } from "./background/core/rateLimit.js";
 import {
@@ -9,11 +17,11 @@ import {
   getDomain as getDomainCross,
 } from "./background/core/sessionImport.js";
 
-const VERIFIED_IDS_API_URL = "https://masterapi.eticaatest.co.in/candidates/verified-ids";
+const VERIFIED_IDS_API_URL = `${PROFILE_API_URL}/candidates/verified-ids`;
 
-const CANDIDATES_API_URL = "https://masterapi.eticaatest.co.in/candidates";
+const CANDIDATES_API_URL = `${PROFILE_API_URL}/candidates`;
 
-const UPLOAD_RESUME_API_URL = "https://masterapi.eticaatest.co.in/candidates/upload-resume";
+const UPLOAD_RESUME_API_URL = `${PROFILE_API_URL}/candidates/upload-resume`;
 
 // MV3 service workers disallow top-level await. Cache the token and refresh it
 // on startup + when storage changes.
@@ -27,6 +35,10 @@ function getAuthToken() {
 function getBearerAuthHeaderValue() {
   const token = getAuthToken();
   return token ? `Bearer ${token}` : "";
+}
+
+function isLoggedIn() {
+  return Boolean(getAuthToken());
 }
 
 async function ensureAuthTokenLoaded() {
@@ -87,8 +99,21 @@ const pendingResumeByUserId = new Map(); // userId -> { cvBuffer, cv_updated_at 
 const mappingDataByUserId = new Map(); // userId -> { customerId, scrappedBy, candidateId }
 const mappingDoneByCandidateId = new Set(); // candidateId -> true
 
-function handleApiInterceptorMessage(msg, sender) {
+// --------------------------------------------------------------------------------------
+// NJP / NH (Naukri Hiring) state
+// We only scrape on detail pages (/hiring/<jobId>/apply/<applicationId>).
+// --------------------------------------------------------------------------------------
+const nhAppDetailByApplicationId = new Map(); // applicationId -> application detail JSON
+const nhContactByApplicationId = new Map(); // applicationId -> contact-details JSON
+const nhResumeByApplicationId = new Map(); // applicationId -> { cvBuffer, cv_updated_at }
+const nhBackendCandidateIdByApplicationId = new Map(); // applicationId -> backend candidate UUID
+const nhTabIdByApplicationId = new Map(); // applicationId -> tabId for ✓ badge
+const nhLastSentSignatureByApplicationId = new Map(); // applicationId -> signature string (dedupe)
+
+async function handleApiInterceptorMessage(msg, sender) {
   // console.log("🔔 Background received message:", msg?.url);
+  await ensureAuthTokenLoaded();
+  if (!isLoggedIn()) return;
 
   // const isJsProfileApi =
   //   typeof msg.url === "string" &&
@@ -110,7 +135,9 @@ function handleApiInterceptorMessage(msg, sender) {
 
   const isResumeApi =
     typeof msg.url === "string" &&
-    (msg.url.includes("/jsprofile/download/resume") || msg.url.includes("jsprofile/download/resume"));
+    (msg.url.includes("/jsprofile/download/resume") ||
+      msg.url.includes("jsprofile/download/resume") ||
+      isNhResumeDownloadApi(msg.url));
   const isListingPage = typeof msg.pathname === "string" && msg.pathname.includes("search");
   const hasTuples = Array.isArray(msg?.data?.tuples);
 
@@ -121,6 +148,39 @@ function handleApiInterceptorMessage(msg, sender) {
     if (!cvBuffer) {
       console.log("⏭️  Resume API detected but cvBuffer missing");
       return;
+    }
+
+    // NH (Naukri Hiring) resume: correlate by applicationId from pathname/data.
+    if (isNhResumeDownloadApi(msg.url)) {
+      const fromDataAppId = msg?.data?.nh_applicationId ? String(msg.data.nh_applicationId) : "";
+      const fromPath = extractNhIdsFromPathname(msg?.pathname || "");
+      const applicationId = fromDataAppId || fromPath.applicationId || "";
+      if (!applicationId) {
+        console.log("⏭️  [NH] Resume captured but applicationId missing");
+        return;
+      }
+
+      const appDetail = nhAppDetailByApplicationId.get(String(applicationId));
+      const cv_updated_at = extractCvUpdatedAtFromNhApplication(appDetail || {});
+
+      const backendCandidateId = nhBackendCandidateIdByApplicationId.get(String(applicationId)) || null;
+      if (!backendCandidateId) {
+        nhResumeByApplicationId.set(String(applicationId), { cvBuffer, cv_updated_at });
+        console.log("⏳ [NH] Resume buffered (waiting backend candidate_id)", { applicationId });
+        return;
+      }
+
+      return uploadResume(
+        {
+          candidate_id: String(backendCandidateId),
+          cvBuffer,
+          cv_updated_at,
+        },
+        {
+          userId: appDetail?.jobSeekerUserId ? String(appDetail.jobSeekerUserId) : String(applicationId),
+          job_board: "NH",
+        }
+      );
     }
 
     const userIdKey = latestPreviewUserId ? String(latestPreviewUserId) : null;
@@ -148,8 +208,29 @@ function handleApiInterceptorMessage(msg, sender) {
       // Backend expects YYYY-MM-DD (string) or null
       cv_updated_at,
       },
-      { userId: userIdKey }
+      { userId: userIdKey, job_board: "NJ" }
     );
+  }
+
+  // ------------------------------------------------------------------------------------
+  // NH / NJP: hiring.naukri.com detail page flow
+  // ------------------------------------------------------------------------------------
+  if (isNhApplicationDetailApi(msg?.url)) {
+    const applicationId = extractApplicationIdFromNhUrl(msg.url);
+    if (!applicationId) return;
+    if (sender?.tab?.id) nhTabIdByApplicationId.set(String(applicationId), sender.tab.id);
+
+    nhAppDetailByApplicationId.set(String(applicationId), msg.data);
+    return maybeSendNhCombinedCandidate(String(applicationId));
+  }
+
+  if (isNhContactDetailsApi(msg?.url)) {
+    const applicationId = extractApplicationIdFromNhUrl(msg.url);
+    if (!applicationId) return;
+    if (sender?.tab?.id) nhTabIdByApplicationId.set(String(applicationId), sender.tab.id);
+
+    nhContactByApplicationId.set(String(applicationId), msg.data);
+    return maybeSendNhCombinedCandidate(String(applicationId));
   }
 
   if (isContactDetailsOnPreview) {
@@ -178,7 +259,7 @@ function handleApiInterceptorMessage(msg, sender) {
   // console.log("✅ JS PROFILE DATA FOUND (background):", msg.data);
 
   // 🔥 Send data to backend from the background service worker
-  sendCandidateData(msg.data);
+  //sendCandidateData(msg.data);
 
   const profileUserId = msg?.data?.userId;
   if (profileUserId) {
@@ -198,10 +279,27 @@ function handleApiInterceptorMessage(msg, sender) {
 // Listen for messages from popup + content scripts.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   try {
-    // Interceptor pipeline (contentScript -> background).
+    // If not logged in, do not do any work for automatic pipelines.
+    // Allow a small set of utility actions to still function.
     if (message?.source === "API_INTERCEPTOR") {
+      // Interceptor pipeline (contentScript -> background).
       handleApiInterceptorMessage(message, sender);
       return;
+    }
+
+    const allowedWithoutLogin =
+      message?.type === "PING" ||
+      message?.action === "updateUninstallURL" ||
+      message?.action === "getDomain";
+
+    if (!isLoggedIn() && !allowedWithoutLogin) {
+      // Do nothing when logged out.
+      try {
+        sendResponse?.({ ok: false, error: "Not logged in" });
+      } catch {
+        // ignore
+      }
+      return true;
     }
 
     // Popup/background protocol (ported from Working_extension).
@@ -252,7 +350,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         const token = message?.token ? String(message.token) : "";
         if (token) {
-          const uninstallUrl = `https://dms.eticaa.com/extension/uninstall?token=${encodeURIComponent(token)}`;
+          const uninstallUrl = `${WEB_APP_URL}/extension/uninstall?token=${encodeURIComponent(token)}`;
           chrome.runtime.setUninstallURL(uninstallUrl, () => {
             if (chrome.runtime.lastError) {
               console.error("[Background] Failed to update uninstall URL:", chrome.runtime.lastError);
@@ -319,7 +417,7 @@ async function postCustomerCandidateMapping(mapData) {
   }).catch(() => null);
 }
 
-async function maybeMapCustomerToCandidateAfterResumeUpload(userId, candidateId) {
+async function maybeMapCustomerToCandidateAfterResumeUpload(userId, candidateId, jobBoard) {
   try {
     const uid = userId ? String(userId) : "";
     const cid = candidateId ? String(candidateId) : "";
@@ -346,7 +444,7 @@ async function maybeMapCustomerToCandidateAfterResumeUpload(userId, candidateId)
       customerId: current.customerId,
       candidateId: current.candidateId,
       scrappedBy: current.scrappedBy,
-      job_board: "NJ",
+      job_board: jobBoard ? String(jobBoard) : "NJ",
     });
 
     mappingDoneByCandidateId.add(cid);
@@ -373,10 +471,204 @@ async function uploadResume(data, opts = {}) {
     // console.log("upload-resume response body:", resultText);
 
     if (res.ok) {
-      await maybeMapCustomerToCandidateAfterResumeUpload(opts?.userId, data?.candidate_id);
+      await maybeMapCustomerToCandidateAfterResumeUpload(opts?.userId, data?.candidate_id, opts?.job_board);
     }
   } catch (err) {
     console.error("❌ Failed to upload resume:", err);
+  }
+}
+
+async function maybeSendNhCombinedCandidate(applicationId) {
+  try {
+    const appId = applicationId ? String(applicationId) : "";
+    if (!appId) return;
+
+    const appDetail = nhAppDetailByApplicationId.get(appId);
+    const contactDetails = nhContactByApplicationId.get(appId);
+
+    if (!appDetail || !contactDetails) {
+      return;
+    }
+
+    // Dedupe only within a short window to avoid double posts from rapid duplicate intercepts,
+    // but allow reload/rehydration to run again.
+    const signature = [
+      appDetail?.jobSeekerUserId || "",
+      appDetail?.jobId || "",
+      appDetail?.applicationId || "",
+      Array.isArray(contactDetails?.email) ? (contactDetails.email[0]?.value || "") : "",
+      Array.isArray(contactDetails?.phoneNumber) ? (contactDetails.phoneNumber[0]?.value || "") : "",
+    ].join("|");
+
+    const now = Date.now();
+    const lastMeta = nhLastSentSignatureByApplicationId.get(appId);
+    if (lastMeta?.signature === signature && typeof lastMeta?.atMs === "number" && now - lastMeta.atMs < 1200) {
+      return;
+    }
+    nhLastSentSignatureByApplicationId.set(appId, { signature, atMs: now });
+
+    await ensureAuthTokenLoaded();
+
+    // Convert Hiring APIs -> "profile-like" + "contactdetails-like" so we reuse the
+    // existing Naukri mapper and keep the exact same payload keys/schema.
+    const firstEmail = Array.isArray(contactDetails?.email) ? String(contactDetails.email[0]?.value || "") : "";
+    const phoneValues = Array.isArray(contactDetails?.phoneNumber)
+      ? contactDetails.phoneNumber.map((p) => String(p?.value || "")).filter(Boolean)
+      : [];
+
+    const contactLike = {
+      email: firstEmail || "",
+      parsedPhoneNos: phoneValues.map((num) => ({ number: num, type: "M" })),
+      phoneNo: phoneValues[0] || "",
+    };
+
+    const ctcAbs = Number(appDetail?.ctc?.absolute || 0);
+    const expCtcAbs = Number(appDetail?.expectedCtc?.absolute || 0);
+
+    const workExperiences = Array.isArray(appDetail?.workExp) ? appDetail.workExp : [];
+    const educations = Array.isArray(appDetail?.education) ? appDetail.education : [];
+    const languages = Array.isArray(appDetail?.languages) ? appDetail.languages : [];
+
+    const profileLike = {
+      name: appDetail?.name || "",
+      email: firstEmail || "",
+      userId: appDetail?.jobSeekerUserId ? String(appDetail.jobSeekerUserId) : "",
+      city: appDetail?.currentCity || "",
+      prefLocation: appDetail?.preferredLocations || "",
+      keywords: appDetail?.keySkills || "",
+      displayKeywords: appDetail?.mayAlsoKnowSkills || "",
+      jobTitle: appDetail?.profileSummary || appDetail?.role || "",
+      summary: appDetail?.summary || "",
+      role: appDetail?.role || "",
+      farea: appDetail?.functionalArea || "",
+      industryType: appDetail?.industry || "",
+      totalExperience: appDetail?.experience?.years != null ? String(appDetail.experience.years) : "",
+      rawTotalExperience: appDetail?.experience?.years != null ? String(appDetail.experience.years) : "",
+      noticePeriod: appDetail?.noticePeriod || "",
+      empStatus: appDetail?.isCurrentlyUnemployed ? "unemployed" : "",
+      jobType: "",
+      // Resdex mapper expects lakhs for INR (value * 100000 = absolute)
+      ctcType: "INR",
+      rawCtc: ctcAbs > 0 ? String(ctcAbs / 100000) : "",
+      ctcValue: ctcAbs > 0 ? String(ctcAbs / 100000) : "",
+      expectedCtcType: "INR",
+      rawExpectedCtc: expCtcAbs > 0 ? String(expCtcAbs / 100000) : "",
+      expectedCtcValue: expCtcAbs > 0 ? String(expCtcAbs / 100000) : "",
+      birthDate: appDetail?.otherDetails?.personal?.dob || "",
+      gender: appDetail?.otherDetails?.personal?.gender || "",
+      maritalStatus: appDetail?.otherDetails?.personal?.maritalStatus || "",
+      modifiedDate: appDetail?.addedOn ? String(appDetail.addedOn).slice(0, 10) : "",
+      viewDate: appDetail?.lastActiveOnResdex ? String(appDetail.lastActiveOnResdex).slice(0, 10) : "",
+      // Shapes expected by mapper:
+      workExperiences: workExperiences.map((we) => {
+        const isCurrent = String(we?.current || "") === "1" || we?.workingTo == null;
+        return {
+          organization: we?.company || "",
+          designation: we?.designation || "",
+          profile: we?.jobProfile || "",
+          startDate: we?.workingFrom || "",
+          endDate: isCurrent ? "Till Date" : (we?.workingTo || ""),
+          empTypeLable: isCurrent ? "Current" : "",
+          startYearMillis: null,
+          endYearMillis: null,
+        };
+      }),
+      educations: educations.map((ed) => {
+        const degreeType = (ed?.degreeType || "").toString().toLowerCase();
+        const isPg = degreeType.includes("post");
+        return {
+          educationTypeId: isPg ? 2 : 1,
+          course: { label: ed?.degree || "" },
+          spec: { label: ed?.specialization || "" },
+          institute: { label: ed?.institute || "" },
+          entityInstitute: { label: ed?.institute || "" },
+          yearOfCompletion: ed?.year != null ? String(ed.year) : "",
+        };
+      }),
+      languages: languages.map((l) => {
+        const parts = [];
+        if (l?.canRead) parts.push("read");
+        if (l?.canWrite) parts.push("write");
+        if (l?.canSpeak) parts.push("speak");
+        return {
+          lang: l?.language || "",
+          proficiency: { label: l?.proficiency || "" },
+          ability: parts.join(" "),
+        };
+      }),
+      projects: [],
+      certifications: [],
+      skills: [],
+    };
+
+    const payload = mapProfileResponseToCandidatesPayload(profileLike, contactLike);
+    payload.source = "NH";
+
+    const res = await fetch(CANDIDATES_API_URL, {
+        method: "POST",
+        headers: {
+        accept: "*/*",
+        Authorization: getBearerAuthHeaderValue(),
+          "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const resultText = await res.text();
+
+    // Capture backend candidate UUID (same multi-shape parsing as NJB).
+    let candidateId = null;
+    try {
+      const parsed = JSON.parse(resultText);
+      candidateId =
+        parsed?.data?.data?.profile?.id ||
+        parsed?.data?.profile?.id ||
+        parsed?.data?.id ||
+        parsed?.candidate?.id ||
+        parsed?.id ||
+        null;
+    } catch {
+      // ignore
+    }
+
+    if (!candidateId) candidateId = tryExtractUuidFromCandidatesResponseText(resultText);
+
+    if (candidateId) {
+      nhBackendCandidateIdByApplicationId.set(appId, String(candidateId));
+
+      // If resume was captured earlier, upload it now.
+      const pending = nhResumeByApplicationId.get(appId);
+      if (pending?.cvBuffer) {
+        nhResumeByApplicationId.delete(appId);
+        await uploadResume(
+          {
+            candidate_id: String(candidateId),
+            cvBuffer: pending.cvBuffer,
+            cv_updated_at: pending.cv_updated_at || null,
+          },
+          {
+            // Use jobSeekerUserId for mapping identity (stable across applications).
+            userId: appDetail?.jobSeekerUserId ? String(appDetail.jobSeekerUserId) : appId,
+            job_board: "NH",
+          }
+        );
+      }
+
+      // Paint ✓ on the Hiring details page.
+      try {
+        const tabId = nhTabIdByApplicationId.get(appId);
+        if (tabId) {
+          chrome.tabs.sendMessage(tabId, { type: "NH_DETAIL_BADGE", candidateId: String(candidateId) });
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // Keep log light; avoid dumping full payload.
+    console.log("✅ [NH] Sent candidate to /candidates:", { status: res.status, applicationId: appId });
+  } catch (err) {
+    console.error("❌ [NH] Failed to send candidate to /candidates:", err);
   }
 }
 
@@ -392,26 +684,26 @@ function getCvUpdatedAtForResume(profileData) {
   return formatLocalDateString(new Date());
 }
 
-async function sendCandidateData(data) {
-  try {
-    const res = await fetch(
-      "http://localhost:5001/api/candidate-intercept-data",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          accept: "application/json",
-        },
-        body: JSON.stringify(data),
-      }
-    );
+// async function sendCandidateData(data) {
+//   try {
+//     const res = await fetch(
+//       "http://localhost:5001/api/candidate-intercept-data",
+//       {
+//         method: "POST",
+//         headers: {
+//           "Content-Type": "application/json",
+//           accept: "application/json",
+//         },
+//         body: JSON.stringify(data),
+//       }
+//     );
 
-    const result = await res.json();
-    console.log("✅ Sent to backend (background):", result);
-  } catch (err) {
-    console.error("❌ Failed to send candidate data (background):", err);
-  }
-}
+//     const result = await res.json();
+//     console.log("✅ Sent to backend (background):", result);
+//   } catch (err) {
+//     console.error("❌ Failed to send candidate data (background):", err);
+//   }
+// }
 
 /** Format a Date as YYYY-MM-DD using local date (avoids UTC off-by-one). */
 function formatLocalDateString(d) {
@@ -880,9 +1172,9 @@ async function maybeSendCombinedCandidateToCandidatesApi(userId) {
         pendingResumeByUserId.delete(String(userId));
         await uploadResume(
           {
-            candidate_id: String(candidateId),
-            cvBuffer: pending.cvBuffer,
-            cv_updated_at: pending.cv_updated_at || null,
+          candidate_id: String(candidateId),
+          cvBuffer: pending.cvBuffer,
+          cv_updated_at: pending.cv_updated_at || null,
           },
           { userId }
         );
@@ -1123,20 +1415,20 @@ async function postVerifiedIdsAndBroadcast(payload, force) {
     lastNjbVerifiedIdsPayload.lastSentSignature = signature;
   }
 
-  const res = await fetch(VERIFIED_IDS_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      accept: "*/*",
+    const res = await fetch(VERIFIED_IDS_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        accept: "*/*",
       Authorization: getBearerAuthHeaderValue(),
-    },
-    body: JSON.stringify(payload),
-  });
+      },
+      body: JSON.stringify(payload),
+    });
 
-  const resultText = await res.text();
-  console.log("✅ Sent listing candidates to verified-ids API:", {
-    status: res.status,
-    body: resultText,
+    const resultText = await res.text();
+    console.log("✅ Sent listing candidates to verified-ids API:", {
+      status: res.status,
+      body: resultText,
     count: Array.isArray(payload?.ids) ? payload.ids.length : 0,
   });
 
@@ -1450,7 +1742,7 @@ async function handleImportSession(sessionData, sendResponse) {
         if (["Strict", "Lax", "None"].includes(cookie.sameSite)) cookieDetails.sameSite = cookie.sameSite;
         await chrome.cookies.set(cookieDetails);
         successCount++;
-      } catch (err) {
+  } catch (err) {
         failureCount++;
         console.warn("Failed to set cookie", cookie?.name, err);
       }

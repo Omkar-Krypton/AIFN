@@ -1,6 +1,6 @@
 /* global chrome */
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, Check, ChevronDown, CircleArrowRight, Loader2, Search, Share2, Users, X } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, CircleArrowRight, Loader2, Search, User, Users, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { API_URL } from "../config/api";
 import { SS_BUILD_DATE, VERSION_DISPLAY } from "../config/version";
@@ -10,8 +10,10 @@ import Navbar from "./Navbar";
 
 function ShareSession() {
   const [users, setUsers] = useState([]);
+  const [teams, setTeams] = useState([]);
   const [isValidDomain, setIsValidDomain] = useState(false);
   const [selectedUserIds, setSelectedUserIds] = useState([]);
+  const [selectedTeamIds, setSelectedTeamIds] = useState([]);
   const [isSelectAll, setIsSelectAll] = useState(false);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [error, setError] = useState("");
@@ -22,6 +24,8 @@ function ShareSession() {
   const [currentUser, setCurrentUser] = useState(null);
   const [chromeVersion, setChromeVersion] = useState("");
   const [deleting, setDeleting] = useState(false);
+  const [showMembersModal, setShowMembersModal] = useState(false);
+  const [selectedTeamMembers, setSelectedTeamMembers] = useState(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [latestExtensionVersion, setLatestExtensionVersion] = useState(null);
   const dropdownRef = useRef();
@@ -105,10 +109,27 @@ function ShareSession() {
           return;
         }
 
-        // API might return { data: { users, teams } } or { data: [] }
-        const usersList =
-          data?.data?.users && Array.isArray(data.data.users) ? data.data.users : (data?.data || []);
-        setUsers(Array.isArray(usersList) ? usersList : []);
+        // Handle Working_extension structure:
+        // { status, message, data: { teams: [...], users: [...] } }
+        if (data?.data) {
+          if (data.data.teams && Array.isArray(data.data.teams)) {
+            setTeams(data.data.teams || []);
+          } else {
+            setTeams([]);
+          }
+
+          if (data.data.users && Array.isArray(data.data.users)) {
+            setUsers(data.data.users || []);
+          } else {
+            // Fallback: older response where `data` itself is users array
+            const allUsers = data.data || [];
+            setUsers(Array.isArray(allUsers) ? allUsers : []);
+            setTeams([]);
+          }
+        } else {
+          setUsers(Array.isArray(data?.data) ? data.data : []);
+          setTeams([]);
+        }
         setError("");
       } catch (e) {
         fail("Internal server error.");
@@ -121,13 +142,15 @@ function ShareSession() {
 
   useEffect(() => {
     const handleOutsideClick = (e) => {
+      // Do nothing if members modal is open (Working_extension behavior)
+      if (showMembersModal) return;
       if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
         setDropdownOpen(false);
       }
     };
     document.addEventListener("click", handleOutsideClick);
     return () => document.removeEventListener("click", handleOutsideClick);
-  }, []);
+  }, [showMembersModal]);
 
   useEffect(() => {
     const getChromeVersion = async () => {
@@ -166,19 +189,35 @@ function ShareSession() {
     });
   }, [users, searchQuery]);
 
+  const filteredTeams = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return teams;
+    return teams.filter((t) => String(t?.name || "").toLowerCase().includes(q));
+  }, [teams, searchQuery]);
+
   const grabSessionData = (message) =>
     new Promise((resolve) => {
       chrome.runtime.sendMessage(message, (response) => resolve(response));
     });
 
-  const toggleUser = (userId) => {
+  const toggleUser = (userId, e) => {
+    if (e) e.stopPropagation();
+    if (isSelectAll) setIsSelectAll(false);
     setSelectedUserIds((prev) => {
       const next = prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId];
       return next;
     });
   };
 
-  const toggleAll = () => {
+  const toggleTeam = (teamId, e) => {
+    if (e) e.stopPropagation();
+    if (isSelectAll) setIsSelectAll(false);
+
+    setSelectedTeamIds((prev) => (prev.includes(teamId) ? prev.filter((id) => id !== teamId) : [...prev, teamId]));
+  };
+
+  const toggleAll = (e) => {
+    if (e) e.stopPropagation();
     if (searchQuery.trim()) {
       const ids = filteredUsers.map((u) => u._id || u.id || u.userId).filter(Boolean);
       const allSelected = ids.length > 0 && ids.every((id) => selectedUserIds.includes(id));
@@ -203,6 +242,32 @@ function ShareSession() {
     setIsSelectAll(allSelected);
   }, [selectedUserIds, users, searchQuery]);
 
+  const handleShowTeamMembers = (team, e) => {
+    if (e) e.stopPropagation();
+    setDropdownOpen(false);
+    setSelectedTeamMembers(team);
+    setShowMembersModal(true);
+  };
+
+  const handleCloseMembersModal = () => {
+    setShowMembersModal(false);
+    setSelectedTeamMembers(null);
+  };
+
+  const selectionSummary = useMemo(() => {
+    const totalSelections = selectedUserIds.length + selectedTeamIds.length;
+    if (isSelectAll) {
+      return `All users selected (${users.length})`;
+    }
+    if (totalSelections > 0) {
+      const parts = [];
+      if (selectedTeamIds.length > 0) parts.push(`${selectedTeamIds.length} team${selectedTeamIds.length > 1 ? "s" : ""}`);
+      if (selectedUserIds.length > 0) parts.push(`${selectedUserIds.length} user${selectedUserIds.length > 1 ? "s" : ""}`);
+      return `${parts.join(", ")} selected`;
+    }
+    return "Select teams or users to collaborate";
+  }, [isSelectAll, selectedTeamIds.length, selectedUserIds.length, users.length]);
+
   const handleShareSession = async () => {
     if (showUpdateModal) return;
     setLoading(true);
@@ -215,10 +280,18 @@ function ShareSession() {
 
     try {
       if (!isValidDomain) return fail("Open a Naukri or Shine tab first.");
-      if (!isSelectAll && selectedUserIds.length === 0) return fail("Select at least 1 user.");
+      if (!isSelectAll && selectedUserIds.length === 0 && selectedTeamIds.length === 0) return fail("Select at least 1 team or user.");
 
       // NJB rule: share max 4 users unless select-all.
-      if (isNJBDomain(currentDomain) && !isSelectAll && selectedUserIds.length > 4) {
+      if (isNJBDomain(currentDomain)) {
+        const totalSelectedUsers = isSelectAll ? users?.length : selectedUserIds.length;
+        if (totalSelectedUsers > 4 && selectedTeamIds.length === 0) {
+          return fail("Share session allowed up to 4 users.");
+        }
+      }
+
+      // Keep legacy behavior (if user selects >4 users but also selected a team, allow).
+      if (isNJBDomain(currentDomain) && !isSelectAll && selectedUserIds.length > 4 && selectedTeamIds.length === 0) {
         return fail("Share session allowed up to 4 users.");
       }
 
@@ -241,7 +314,8 @@ function ShareSession() {
 
       const requestBody = {
         session: sessionDataWithUser,
-        user_ids: isSelectAll ? undefined : selectedUserIds,
+        user_ids: selectedUserIds.length > 0 ? selectedUserIds : undefined,
+        team_ids: selectedTeamIds.length > 0 ? selectedTeamIds : undefined,
         is_all: isSelectAll,
       };
 
@@ -308,12 +382,6 @@ function ShareSession() {
     }
   };
 
-  const selectionText = isSelectAll
-    ? `All users selected (${users.length})`
-    : selectedUserIds.length
-      ? `${selectedUserIds.length} user${selectedUserIds.length > 1 ? "s" : ""} selected`
-      : "Select users to collaborate";
-
   return (
     <div className="w-full max-w-[350px] mx-auto bg-transparent m-0 p-0">
       <Navbar />
@@ -347,6 +415,77 @@ function ShareSession() {
           </div>
         )}
 
+        {showMembersModal && selectedTeamMembers && (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[9999] p-3">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-[300px] max-h-[80vh] flex flex-col">
+              <div className="flex items-center justify-between p-3 border-b border-gray-200 bg-gradient-to-r from-teal-50 to-teal-100">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 bg-teal-600 rounded-full flex items-center justify-center">
+                    <Users className="w-4 h-4 text-white" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-900 leading-tight">{selectedTeamMembers.name}</h3>
+                    <p className="text-[11px] text-gray-600">
+                      {selectedTeamMembers.memberCount || 0} member{selectedTeamMembers.memberCount !== 1 ? "s" : ""}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleCloseMembersModal}
+                  className="p-1.5 rounded-md text-gray-700 hover:bg-white/60"
+                  title="Close"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-hidden flex flex-col">
+                <div className="px-3 py-2 bg-gray-50">
+                  <p className="text-[10px] font-semibold text-gray-700 uppercase tracking-wide">Team Members</p>
+                </div>
+
+                <div className="flex-1 overflow-y-auto px-3 py-2">
+                  {selectedTeamMembers.members?.length > 0 ? (
+                    <div className="space-y-1.5">
+                      {selectedTeamMembers.members.map((member) => (
+                        <div key={member.id} className="flex items-start gap-2 p-2 bg-white border border-gray-200 rounded-md">
+                          <div className="w-8 h-8 bg-gradient-to-br from-teal-400 to-teal-600 rounded-full flex items-center justify-center">
+                            <User className="w-4 h-4 text-white" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-semibold text-gray-900 truncate">
+                              {member.fullName || "Unnamed User"}
+                            </p>
+                            <p className="text-[11px] text-gray-600 truncate">{member.email}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center py-8">
+                      <Users className="w-6 h-6 text-gray-400 mb-1" />
+                      <p className="text-xs font-semibold text-gray-700">No members found</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-3 border-t border-gray-200 bg-gray-50">
+                <button
+                  type="button"
+                  onClick={handleCloseMembersModal}
+                  className="w-full px-3 py-2 text-xs font-semibold text-white rounded-md transition-colors hover:opacity-90"
+                  style={{ backgroundColor: import.meta.env.VITE_PRIMARY_COLOR || "#009689" }}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {isValidDomain && (
           <div className="mb-4">
             <label className="block text-sm font-medium text-[#475467] mb-1.5">
@@ -364,7 +503,7 @@ function ShareSession() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <Users className="w-4 h-4 text-teal-700" />
-                    <span className="text-sm text-teal-700">{selectionText}</span>
+                      <span className="text-sm text-teal-700">{selectionSummary}</span>
                   </div>
                   <ChevronDown
                     className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${
@@ -381,15 +520,22 @@ function ShareSession() {
                       <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 w-3 h-3 text-gray-400" />
                       <input
                         type="text"
-                        placeholder="Search users..."
+                          placeholder="Search teams or users..."
                         value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            setSearchQuery(e.target.value);
+                          }}
+                          onClick={(e) => e.stopPropagation()}
                         className="w-full pl-7 pr-7 py-1.5 text-xs border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
                       />
                       {searchQuery && (
                         <button
                           type="button"
-                          onClick={() => setSearchQuery("")}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSearchQuery("");
+                            }}
                           className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
                         >
                           <X className="w-3 h-3" />
@@ -398,10 +544,72 @@ function ShareSession() {
                     </div>
                   </div>
 
+                    {filteredTeams.length > 0 && (
+                      <div className="border-b border-gray-100">
+                        <div className="px-2 py-1.5 bg-gray-50">
+                          <span className="text-[10px] font-semibold text-gray-600 uppercase">Teams</span>
+                        </div>
+
+                        {filteredTeams.map((team) => {
+                          const isSelected = selectedTeamIds.includes(team.id);
+                          return (
+                            <button
+                              key={team.id}
+                              type="button"
+                              onClick={(e) => {
+                                if (e.target?.type === "checkbox") return;
+                                e.stopPropagation();
+                                toggleTeam(team.id, e);
+                              }}
+                              className={`w-full px-2 py-1.5 flex items-center gap-2 border-b border-gray-50 last:border-b-0 text-left transition-colors duration-150 hover:bg-teal-50 cursor-pointer ${
+                                isSelected ? "bg-teal-50 border-teal-200" : ""
+                              }`}
+                            >
+                              <div className="relative" onClick={(e) => e.stopPropagation()}>
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={(e) => toggleTeam(team.id, e)}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="w-3 h-3 text-teal-600 rounded border-gray-300 focus:ring-teal-500 cursor-pointer"
+                                />
+                                {isSelected && (
+                                  <Check className="w-2.5 h-2.5 text-teal-600 absolute top-[2px] left-[2px] pointer-events-none" />
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                                <Users className="w-3 h-3 text-teal-600 flex-shrink-0" />
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-xs font-medium text-gray-900 truncate">{team.name}</p>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => handleShowTeamMembers(team, e)}
+                                    className="text-[10px] text-teal-600 hover:text-teal-700 hover:underline cursor-pointer"
+                                  >
+                                    {team.memberCount || 0} member{team.memberCount !== 1 ? "s" : ""}
+                                  </button>
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {filteredUsers.length > 0 && (
+                      <div className="px-2 py-1.5 bg-gray-50 border-b border-gray-100">
+                        <span className="text-[10px] font-semibold text-gray-600 uppercase">Users</span>
+                      </div>
+                    )}
+
                   <div className="border-b border-gray-100">
                     <button
                       type="button"
-                      onClick={toggleAll}
+                        onClick={(e) => {
+                          if (e.target?.type === "checkbox") return;
+                          toggleAll(e);
+                        }}
                       className="w-full px-2 py-1.5 text-left hover:bg-teal-50 transition-colors duration-150 flex items-center gap-2 cursor-pointer"
                     >
                       <div className="relative">
@@ -451,7 +659,10 @@ function ShareSession() {
                           <button
                             key={userId || user.email}
                             type="button"
-                            onClick={() => toggleUser(userId)}
+                            onClick={(e) => {
+                              if (e.target?.type === "checkbox") return;
+                              toggleUser(userId, e);
+                            }}
                             className={`w-full px-2 py-1.5 flex items-center gap-2 border-b border-gray-50 last:border-b-0 text-left transition-colors duration-150 hover:bg-teal-50 cursor-pointer ${
                               isSelected ? "bg-teal-50 border-teal-200" : ""
                             }`}
@@ -461,6 +672,7 @@ function ShareSession() {
                                 type="checkbox"
                                 readOnly
                                 checked={isSelected}
+                                onClick={(e) => e.stopPropagation()}
                                 className="w-3 h-3 text-teal-600 rounded border-gray-300 focus:ring-teal-500 cursor-pointer"
                               />
                               {isSelected && (
@@ -486,15 +698,15 @@ function ShareSession() {
                         handleShareSession();
                         setDropdownOpen(false);
                       }}
-                      disabled={loading || (!isSelectAll && selectedUserIds.length === 0)}
+                      disabled={loading || (!isSelectAll && selectedUserIds.length === 0 && selectedTeamIds.length === 0)}
                       className={`flex-1 font-medium py-1.5 px-3 rounded-md flex items-center justify-center gap-1.5 text-xs transition-all duration-200 ${
-                        loading || (!isSelectAll && selectedUserIds.length === 0)
+                        loading || (!isSelectAll && selectedUserIds.length === 0 && selectedTeamIds.length === 0)
                           ? "bg-gray-400 cursor-not-allowed opacity-70"
                           : "text-white hover:shadow-md cursor-pointer hover:opacity-90"
                       }`}
                       style={{
                         backgroundColor:
-                          loading || (!isSelectAll && selectedUserIds.length === 0)
+                          loading || (!isSelectAll && selectedUserIds.length === 0 && selectedTeamIds.length === 0)
                             ? undefined
                             : (import.meta.env.VITE_PRIMARY_COLOR || "#009689"),
                       }}

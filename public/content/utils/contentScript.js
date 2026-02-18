@@ -3,6 +3,12 @@ let freezeOverlay = null;
 function freezePage(message = "Session expired. Please import again.") {
   if (freezeOverlay) return;
 
+  // At document_start the body might not exist yet; defer until it does.
+  if (!document.body) {
+    setTimeout(() => freezePage(message), 50);
+    return;
+  }
+
   freezeOverlay = document.createElement("div");
   freezeOverlay.id = "etica-freeze-overlay";
   freezeOverlay.innerHTML = `

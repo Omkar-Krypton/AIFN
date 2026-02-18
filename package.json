@@ -6,6 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:obfuscate": "npm run build && npm run obfuscate",
+    "build:extension": "node scripts/build.js && node scripts/obfuscate.js && node scripts/randomize-build.cjs && node scripts/fix-missing-imports.cjs",
+    "build:extension:no-obf": "node scripts/build.js --no-obfuscate && node scripts/randomize-build.cjs && node scripts/fix-missing-imports.cjs",
+    "obfuscate": "node scripts/obfuscate.js",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -27,6 +31,8 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
+    "javascript-obfuscator": "^4.2.2",
+    "terser": "^5.46.0",
     "vite": "^7.2.4"
   }
 }

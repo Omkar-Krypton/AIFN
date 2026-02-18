@@ -1,7 +1,23 @@
 (function () {
   // console.log("🚀 API Interceptor inject.js loaded");
   const isNaukriHost = /(^|\.)naukri\.com$/i.test(window.location.hostname);
+  // Page-context script can't read extension storage. Content script posts EXT_AUTH_STATE.
+  // Default false => don't intercept/click/download when not logged in.
+  let extLoggedIn = false;
+  window.addEventListener("message", (ev) => {
+    try {
+      if (ev.source !== window) return;
+      if (ev.data?.source !== "EXT_AUTH_STATE") return;
+      extLoggedIn = Boolean(ev.data?.loggedIn);
+    } catch {
+      // ignore
+    }
+  });
   const naukriResumeState = {
+    inFlight: false,
+    lastSignature: "",
+  };
+  const naukriHiringResumeState = {
     inFlight: false,
     lastSignature: "",
   };
@@ -15,6 +31,232 @@
       return;
     }
     console.log("[NAUKRI_RESUME_TRIGGER]", message);
+  }
+
+  function isResdexPreviewPage() {
+    const host = (window.location.hostname || "").toLowerCase();
+    if (host !== "resdex.naukri.com") return false;
+    return (window.location.pathname || "").includes("/v3/preview");
+  }
+
+  function installResdexViewPhoneUserClickTracker() {
+    try {
+      if (window.__nj_view_phone_user_click_tracker_installed) return;
+      window.__nj_view_phone_user_click_tracker_installed = true;
+
+      // Track user-initiated clicks so we don't auto-click after they already did.
+      document.addEventListener(
+        "click",
+        (e) => {
+          try {
+            const t = e?.target;
+            const el = t && typeof t.closest === "function" ? t.closest("button") : null;
+            const text = (el?.textContent || "").toLowerCase();
+            const isViewPhone = text.includes("view phone number") || text.includes("phone number");
+            if (isViewPhone) {
+              window.__nj_view_phone_user_clicked = true;
+            }
+          } catch {
+            // ignore
+          }
+        },
+        true
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  function markResdexContactDetailsSeen() {
+    try {
+      if (!isResdexPreviewPage()) return;
+      window.__nj_contactdetails_seen = true;
+    } catch {
+      // ignore
+    }
+  }
+
+  function scheduleResdexViewPhoneAutoClick() {
+    try {
+      if (!extLoggedIn) return false;
+      if (!isResdexPreviewPage()) return false;
+
+      installResdexViewPhoneUserClickTracker();
+
+      if (window.__nj_view_phone_autoclick_started) return true;
+      window.__nj_view_phone_autoclick_started = true;
+
+      // Click sometime between 5-10 seconds unless user already triggered it.
+      const delayMs = 5000 + Math.floor(Math.random() * 5000);
+
+      window.setTimeout(() => {
+        try {
+          if (!extLoggedIn) return;
+          if (!isResdexPreviewPage()) return;
+          if (window.__nj_view_phone_user_clicked) return;
+          if (window.__nj_contactdetails_seen) return;
+
+          const buttons = document.querySelectorAll("button");
+          for (const button of buttons) {
+            const text = (button.textContent || "").toLowerCase();
+            const hasPhoneText = text.includes("view phone number") || text.includes("phone number");
+            if (!hasPhoneText) continue;
+            if (button.hasAttribute("data-auto-clicked")) return;
+
+            button.setAttribute("data-auto-clicked", "true");
+            button.click();
+            return;
+          }
+        } catch {
+          // ignore
+        }
+      }, delayMs);
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function isNaukriHiringDetailsPage() {
+    if (!isNaukriHost) return false;
+    const host = (window.location.hostname || "").toLowerCase();
+    if (host !== "hiring.naukri.com") return false;
+    const path = window.location.pathname || "";
+    return /\/hiring\/[^/]+\/apply\/[^/?#]+/i.test(path);
+  }
+
+  function extractHiringIdsFromLocation() {
+    const path = window.location.pathname || "";
+    const m = path.match(/\/hiring\/([^/]+)\/apply\/([^/?#]+)/i);
+    return {
+      jobId: m && m[1] ? String(m[1]) : "",
+      applicationId: m && m[2] ? String(m[2]) : "",
+    };
+  }
+
+  function ensureRmfileInput() {
+    try {
+      let el = document.getElementById("rmfile");
+      if (el) return el;
+      el = document.createElement("input");
+      el.type = "hidden";
+      el.id = "rmfile";
+      el.value = "waiting";
+      (document.body || document.documentElement).appendChild(el);
+      return el;
+    } catch {
+      return null;
+    }
+  }
+
+  function discoverHiringResumeBaseUrl(applicationId) {
+    // Working_extension-style: Naukri exposes a global like `cvDwldUrl`.
+    // Prefer that if present, else fall back to the known endpoint base.
+    try {
+      const g = window;
+      const candidates = [g.cvDwldUrl, g.cvDownloadUrl, g.resumeDownloadUrl].filter(Boolean);
+      for (const c of candidates) {
+        if (typeof c === "string" && c.includes("/rm-document-services/") && c.includes("/download/applications/")) {
+          return c.split("?")[0]; // keep base, we'll append params ourselves
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    if (!applicationId) return "";
+    return (
+      "https://hiring.naukri.com/cloudgateway-rm/rm-document-services/v0/download/applications/" +
+      encodeURIComponent(applicationId)
+    );
+  }
+
+  function buildNaukriHiringResumeUrl(jobId, applicationId) {
+    const j = jobId ? String(jobId) : "";
+    const a = applicationId ? String(applicationId) : "";
+    if (!j || !a) return null;
+
+    const rmfile = ensureRmfileInput();
+    const fromDom = rmfile && typeof rmfile.value === "string" ? rmfile.value.trim() : "";
+    const baseUrl =
+      fromDom && fromDom !== "waiting"
+        ? fromDom.split("?")[0]
+        : discoverHiringResumeBaseUrl(a);
+
+    if (!baseUrl) return null;
+
+    // Important: applyType must be present but empty (applyType=).
+    const resumeUrl = `${baseUrl}?jobId=${encodeURIComponent(j)}&applyType=`;
+
+    // Persist to rmfile so other code can reuse it.
+    try {
+      if (rmfile) rmfile.value = resumeUrl;
+    } catch {
+      // ignore
+    }
+
+    return {
+      resumeUrl,
+      jobId: j,
+      applicationId: a,
+      signature: `${j}|${a}`,
+    };
+  }
+
+  async function triggerNaukriHiringResumeDownloadIfPossible(payload, sourceUrl) {
+    if (!extLoggedIn) return;
+    if (!isNaukriHost) return;
+    if (!isNaukriHiringDetailsPage()) return;
+    if (typeof sourceUrl !== "string" || !sourceUrl.includes("rm-application-detail-services")) return;
+
+    // Only trigger if application has resume.
+    const hasResume = Boolean(payload && typeof payload === "object" && payload.hasResume);
+    if (!hasResume) return;
+
+    // jobId comes from the application-detail payload (most reliable).
+    const locationIds = extractHiringIdsFromLocation();
+    const jobId = payload && typeof payload === "object" ? String(payload.jobId || "") : "";
+    const built = buildNaukriHiringResumeUrl(jobId || locationIds.jobId, locationIds.applicationId);
+    if (!built) return;
+
+    if (naukriHiringResumeState.inFlight || naukriHiringResumeState.lastSignature === built.signature) {
+      return;
+    }
+
+    naukriHiringResumeState.inFlight = true;
+    logNaukri("[NH] Calling download resume API", { resumeUrl: built.resumeUrl });
+
+    try {
+      // Use XHR so it is captured by our existing XHR resume interceptor.
+      await new Promise((resolve, reject) => {
+        const xhr = new window.XMLHttpRequest();
+        xhr.open("GET", built.resumeUrl, true);
+        xhr.withCredentials = true;
+        // Prefer raw bytes; if server returns base64 text we still handle it downstream.
+        xhr.responseType = "arraybuffer";
+        // Required by backend (matches browser request).
+        xhr.setRequestHeader("Appid", "4");
+        xhr.setRequestHeader("Systemid", "naukriIndia");
+        xhr.setRequestHeader("accept", "application/json");
+        xhr.setRequestHeader("content-type", "application/json");
+
+        xhr.onload = () => {
+          const ok = xhr.status >= 200 && xhr.status < 300;
+          if (ok) {
+            naukriHiringResumeState.lastSignature = built.signature;
+          }
+          resolve();
+        };
+        xhr.onerror = () => reject(new Error("XHR network error"));
+        xhr.onabort = () => reject(new Error("XHR aborted"));
+        xhr.send();
+      });
+    } catch (e) {
+      logNaukri("[NH] Download resume API call failed", e);
+    } finally {
+      naukriHiringResumeState.inFlight = false;
+    }
   }
   
 
@@ -101,6 +343,7 @@
   }
 
   async function triggerNaukriResumeDownloadIfPossible(payload, sourceUrl) {
+    if (!extLoggedIn) return;
     if (!isNaukriHost) return;
     if (typeof sourceUrl !== "string" || !sourceUrl.includes("recruiter-js-profile-services")) {
       return;
@@ -214,6 +457,7 @@
   const originalFetch = window.fetch;
 
   window.fetch = async (...args) => {
+    if (!extLoggedIn) return originalFetch(...args);
     const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || 'unknown';
     // console.log("🔍 Fetch intercepted BEFORE call:", url);
 
@@ -229,7 +473,9 @@
 
       const isResumeApi =
         typeof url === "string" &&
-        (url.includes("/jsprofile/download/resume") || url.includes("jsprofile/download/resume"));
+        (url.includes("/jsprofile/download/resume") ||
+          url.includes("jsprofile/download/resume") ||
+          (url.includes("rm-document-services") && url.includes("/download/applications/")));
 
       // Resume API can return:
       // - raw base64 text, OR
@@ -246,13 +492,14 @@
         }
 
         console.log("📄 Resume API intercepted (fetch), sending cvBuffer to background");
+        const nhIds = isNaukriHiringDetailsPage() ? extractHiringIdsFromLocation() : { jobId: "", applicationId: "" };
         window.postMessage(
           {
             source: "API_INTERCEPTOR",
             kind: "FETCH",
             url: clone.url,
             status: clone.status,
-            data: { cvBuffer },
+            data: { cvBuffer, nh_jobId: nhIds.jobId, nh_applicationId: nhIds.applicationId },
             pathname: window.location.pathname
           },
           "*"
@@ -266,7 +513,8 @@
         // Check if it matches our criteria
         const isTargetApi = url.includes("recruiter-js-profile-services") ||
           url.includes("candidates") ||
-          url.includes("contactdetails");
+          url.includes("contactdetails") ||
+          url.includes("rm-application-detail-services");
 
         // if (isTargetApi) console.log("🎯 TARGET API DETECTED:", url);
 
@@ -282,8 +530,14 @@
           "*"
         );
 
+        if (typeof clone.url === "string" && clone.url.includes("contactdetails")) {
+          markResdexContactDetailsSeen();
+        }
+
         // Trigger Naukri resume download from recruiter profile payload itself.
         triggerNaukriResumeDownloadIfPossible(data, clone.url);
+        // Trigger Naukri Hiring resume download from application-detail payload.
+        triggerNaukriHiringResumeDownloadIfPossible(data, clone.url);
       } else {
         // console.log("⏭️  Skipping non-JSON response for:", url);
       }
@@ -308,6 +562,7 @@
     };
 
     xhr.addEventListener("load", async function () {
+      if (!extLoggedIn) return;
       // console.log("🔍 XHR load event fired for:", xhr.responseURL);
       // console.log("📊 XHR Status:", xhr.status, "Ready State:", xhr.readyState);
 
@@ -318,7 +573,9 @@
         const isResumeApi =
           typeof xhr.responseURL === "string" &&
           (xhr.responseURL.includes("/jsprofile/download/resume") ||
-            xhr.responseURL.includes("jsprofile/download/resume"));
+            xhr.responseURL.includes("jsprofile/download/resume") ||
+            (xhr.responseURL.includes("rm-document-services") &&
+              xhr.responseURL.includes("/download/applications/")));
 
         if (isResumeApi) {
           let cvBuffer = "";
@@ -339,13 +596,14 @@
           }
 
           console.log("📄 Resume API intercepted (xhr), sending cvBuffer to background");
+          const nhIds = isNaukriHiringDetailsPage() ? extractHiringIdsFromLocation() : { jobId: "", applicationId: "" };
           window.postMessage(
             {
               source: "API_INTERCEPTOR",
               kind: "XHR",
               url: xhr.responseURL,
               status: xhr.status,
-              data: { cvBuffer },
+              data: { cvBuffer, nh_jobId: nhIds.jobId, nh_applicationId: nhIds.applicationId },
               pathname: window.location.pathname
             },
             "*"
@@ -359,7 +617,8 @@
           // Check if it matches our criteria
           const isTargetApi = xhr.responseURL.includes("recruiter-js-profile-services") ||
             xhr.responseURL.includes("candidates") ||
-            xhr.responseURL.includes("contactdetails");
+            xhr.responseURL.includes("contactdetails") ||
+            xhr.responseURL.includes("rm-application-detail-services");
 
           // if (isTargetApi) console.log("🎯 TARGET XHR API DETECTED:", xhr.responseURL);
 
@@ -375,8 +634,14 @@
             "*"
           );
 
+          if (typeof xhr.responseURL === "string" && xhr.responseURL.includes("contactdetails")) {
+            markResdexContactDetailsSeen();
+          }
+
           // Trigger Naukri resume download from recruiter profile payload itself.
           triggerNaukriResumeDownloadIfPossible(data, xhr.responseURL);
+          // Trigger Naukri Hiring resume download from application-detail payload.
+          triggerNaukriHiringResumeDownloadIfPossible(data, xhr.responseURL);
         } else {
           // console.log("⏭️  Skipping non-JSON XHR response for:", xhr.responseURL);
         }
@@ -444,36 +709,121 @@
   }
 
   // 🔥 AUTO-CLICK "View phone number" button to trigger contactdetails API
+  function tryAutoClickHiringContactOnce() {
+    try {
+      if (!extLoggedIn) return false;
+      if (!isNaukriHiringDetailsPage()) return false;
+
+      // Click ONLY when still in "Contact" (phone icon) state.
+      const containers = Array.from(document.querySelectorAll(".showContactContainer") || []);
+      const target = containers.find((el) => {
+        if (!el) return false;
+        if (el.hasAttribute("data-auto-clicked")) return false;
+        const btnText = (el.querySelector(".showContactContainerBtn")?.textContent || "").trim().toLowerCase();
+        const hasPhoneIcon = !!el.querySelector("i.ore-phone");
+        const hasCopyIcon = !!el.querySelector("i.ore-copy");
+        // After click it becomes ore-copy + phone number; never click that state.
+        return btnText === "contact" && hasPhoneIcon && !hasCopyIcon;
+      });
+
+      if (!target) return false;
+
+      const btn = target.querySelector(".showContactContainerBtn");
+      target.setAttribute("data-auto-clicked", "true");
+
+      try {
+        target.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      } catch {
+        // ignore
+      }
+
+      const fire = (el, type, Ctor, extra) => {
+        try {
+          el.dispatchEvent(new Ctor(type, { bubbles: true, cancelable: true, view: window, ...(extra || {}) }));
+        } catch {
+          // ignore
+        }
+      };
+
+      // Some UIs bind to pointer events; fire a small sequence.
+      const clickSeq = (el) => {
+        if (!el) return;
+        fire(el, "pointerdown", PointerEvent, { pointerId: 1, pointerType: "mouse", isPrimary: true });
+        fire(el, "mousedown", MouseEvent);
+        fire(el, "pointerup", PointerEvent, { pointerId: 1, pointerType: "mouse", isPrimary: true });
+        fire(el, "mouseup", MouseEvent);
+        fire(el, "click", MouseEvent);
+        try {
+          if (typeof el.click === "function") el.click();
+        } catch {
+          // ignore
+        }
+      };
+
+      clickSeq(target);
+      // Also click inner text node if handler is bound there.
+      if (btn) clickSeq(btn);
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function scheduleHiringContactAutoClick(delayMs = 5000) {
+    try {
+      if (!extLoggedIn) return false;
+      if (!isNaukriHiringDetailsPage()) return false;
+      if (window.__nh_contact_autoclick_started) return true;
+      window.__nh_contact_autoclick_started = true;
+
+      const startDelay = Number.isFinite(delayMs) ? delayMs : 5000;
+      window.setTimeout(() => {
+        try {
+          let tries = 0;
+          const maxTries = 25; // ~25s retry window
+
+          const tick = () => {
+            tries += 1;
+            if (tryAutoClickHiringContactOnce()) {
+              return; // done
+            }
+            if (tries >= maxTries) return;
+            window.setTimeout(tick, 1000);
+          };
+
+          tick();
+        } catch {
+          // ignore
+        }
+      }, startDelay);
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function autoClickViewPhoneButton() {
     try {
+      if (!extLoggedIn) return false;
 
-      // ✅ Route guard: only run on /v3/preview
-      if (!window.location.pathname.includes('/v3/preview')) {
-        return false;
-      }
-      // Search all buttons for the one with "View phone number" text
-      const buttons = document.querySelectorAll('button');
+      // ✅ Route guard:
+      // - Resdex preview: auto-click "View phone number"
+      // - Hiring details: auto-click "Contact" container
+      const path = window.location.pathname || "";
+      const isResdexPreview = path.includes("/v3/preview");
+      const isHiringDetail = isNaukriHiringDetailsPage();
 
-      for (const button of buttons) {
-        const text = button.textContent || '';
-        const hasPhoneText = text.toLowerCase().includes('view phone number') ||
-          text.toLowerCase().includes('phone number');
+      if (!isResdexPreview && !isHiringDetail) return false;
 
-        // Check if this button matches the criteria and hasn't been clicked yet
-        if (hasPhoneText && !button.hasAttribute('data-auto-clicked')) {
-          button.setAttribute('data-auto-clicked', 'true');
-          console.log("🎯 Found 'View phone number' button:", button);
-          console.log("🖱️  Auto-clicking button...");
-
-          // Click the button
-          button.click();
-
-          console.log("✅ Button clicked! Waiting for contactdetails API call...");
-          return true;
-        }
+      if (isHiringDetail) {
+        // Delay is required on Hiring pages; do not spam-click (can hit "copy" state).
+        return scheduleHiringContactAutoClick(5000);
       }
 
-      return false;
+      // Resdex preview: schedule auto-click between 5-10 seconds, unless user already clicked.
+      return scheduleResdexViewPhoneAutoClick();
     } catch (e) {
       console.error("❌ Error auto-clicking button:", e);
       return false;

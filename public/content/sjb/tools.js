@@ -1,8 +1,7 @@
 /* global chrome */
 
-// NOTE: In Working_extension this file imported WEB_APP_URL from config. Since MV3 content
-// scripts run as classic scripts here, keep WEB_APP_URL as a local constant.
-const WEB_APP_URL = "https://dms.eticaa.com";
+// Content scripts run as classic scripts (no ESM imports). Keep constants inline.
+const WEB_APP_URL = "https://dms.eticaatest.co.in";
 
 /**
  * Download CV from URL and convert to base64

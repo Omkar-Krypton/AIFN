@@ -1,24 +1,108 @@
-// Inject interceptor only on Naukri pages (prevents interfering with Shine scripts).
 (() => {
-  const host = (window.location.hostname || "").toLowerCase();
-  if (!host.includes("naukri.com")) return;
-
-  const script = document.createElement("script");
-  script.src = chrome.runtime.getURL("inject.js");
-  script.onload = () => {
-    console.log("✅ inject.js loaded and removed from DOM");
-    script.remove();
-  };
-  (document.head || document.documentElement).appendChild(script);
-})();
+// Content scripts run as classic scripts (no ESM imports). Keep constants inline.
+const WEB_APP_URL = "https://dms.eticaatest.co.in";
 
 console.log("🟢 Content script initialized");
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type !== "GET_SCREEN_INFO") return;
+  try {
+    const w = typeof window !== "undefined" ? window : null;
+    const s = w?.screen || null;
+    const width = typeof s?.width === "number" ? s.width : undefined;
+    const height = typeof s?.height === "number" ? s.height : undefined;
+    const pixelRatio = typeof w?.devicePixelRatio === "number" ? w.devicePixelRatio : undefined;
+    sendResponse({
+      ...(typeof width === "number" ? { width: Number(width) } : {}),
+      ...(typeof height === "number" ? { height: Number(height) } : {}),
+      ...(typeof pixelRatio === "number" ? { pixelRatio: Number(pixelRatio) } : {}),
+    });
+  } catch {
+    sendResponse({});
+  }
+  return true;
+});
+
+// --------------------------------------------------------------------------------------
+// CAN_SCRAPE (Rate limit) checks for Resdex (Naukri)
+// Match Working_extension behavior: check on /v3/search, /v3/preview navigation and
+// after interceptor activity. Background freezes ONLY when canScrape === false.
+// --------------------------------------------------------------------------------------
+
+function isResdexNaukriRelevantPage() {
+  const host = (window.location.hostname || "").toLowerCase();
+  if (host !== "resdex.naukri.com") return false;
+  const path = (window.location.pathname || "").toLowerCase();
+  return path.startsWith("/v3/search") || path.startsWith("/v3/preview");
+}
+
+let lastCanScrapeCheckAt = 0;
+function triggerResdexCanScrapeCheck(reason = "") {
+  if (!isResdexNaukriRelevantPage()) return;
+  const now = Date.now();
+  // Debounce to avoid spamming on rapid mutations/interceptor bursts.
+  if (now - lastCanScrapeCheckAt < 3000) return;
+  lastCanScrapeCheckAt = now;
+
+  try {
+    chrome.runtime.sendMessage(
+      {
+        type: "CHECK_CAN_SCRAPE",
+        jobBoard: "NJ",
+        reason,
+      },
+      () => {
+        // Background decides whether to freeze. No UI work here.
+      }
+    );
+  } catch {
+    // ignore
+  }
+}
+
+function setupResdexUrlMonitoring() {
+  // popstate (back/forward)
+  window.addEventListener("popstate", () => setTimeout(() => triggerResdexCanScrapeCheck("popstate"), 100));
+
+  // pushState/replaceState (SPA navigation)
+  const originalPushState = history.pushState;
+  history.pushState = function (...args) {
+    originalPushState.apply(history, args);
+    setTimeout(() => triggerResdexCanScrapeCheck("pushState"), 100);
+  };
+
+  const originalReplaceState = history.replaceState;
+  history.replaceState = function (...args) {
+    originalReplaceState.apply(history, args);
+    setTimeout(() => triggerResdexCanScrapeCheck("replaceState"), 100);
+  };
+
+  // When tab becomes visible again
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      setTimeout(() => triggerResdexCanScrapeCheck("visibility"), 50);
+    }
+  });
+}
+
+// Initial check + monitoring (Resdex only)
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", () => {
+    triggerResdexCanScrapeCheck("domcontentloaded");
+    setupResdexUrlMonitoring();
+  });
+} else {
+  triggerResdexCanScrapeCheck("init");
+  setupResdexUrlMonitoring();
+}
 
 // Listen messages from page
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
 
   if (event.data?.source === "API_INTERCEPTOR") {
+    // If not logged in, do not do anything.
+    if (!cachedAuthToken) return;
     console.log("📨 Content script received message:", event.data.url);
     console.log("📦 Message data:", event.data);
     
@@ -29,6 +113,9 @@ window.addEventListener("message", (event) => {
     } catch (e) {
       console.error("❌ Error sending message to background:", e);
     }
+
+    // After intercept activity on Resdex, re-check rate limit (cached in background).
+    triggerResdexCanScrapeCheck("after_intercept");
   }
 });
 
@@ -37,7 +124,7 @@ window.addEventListener("message", (event) => {
 // Ported behavior from Working_extension: addNjbBadge() based on verified-ids response.
 // --------------------------------------------------------------------------------------
 
-const WEB_APP_URL = "https://dms.eticaa.com";
+//const WEB_APP_URL = `${WEB_APP_URL}`;
 let lastNjbMatched = null; // [{ index, candidateId, ... }]
 let applyBadgesTimer = null;
 
@@ -73,12 +160,52 @@ async function hasAuthToken() {
   return Boolean(token);
 }
 
+function postAuthStateToPage(loggedIn) {
+  try {
+    window.postMessage({ source: "EXT_AUTH_STATE", loggedIn: Boolean(loggedIn) }, "*");
+  } catch {
+    // ignore
+  }
+}
+
+let injectAttempted = false;
+async function ensureInjectJsIfLoggedIn() {
+  const host = (window.location.hostname || "").toLowerCase();
+  if (!host.includes("naukri.com")) return;
+  if (injectAttempted) return;
+
+  const ok = await hasAuthToken();
+  if (!ok) return;
+
+  injectAttempted = true;
+  postAuthStateToPage(true);
+
+  const script = document.createElement("script");
+  script.src = chrome.runtime.getURL("inject.js");
+  script.onload = () => {
+    console.log("✅ inject.js loaded and removed from DOM");
+    // inject.js might load after our first auth-state post; send again.
+    postAuthStateToPage(true);
+    script.remove();
+  };
+  (document.head || document.documentElement).appendChild(script);
+}
+
+// Initial auth load + conditional injection.
+getAuthTokenFromStorage().then((token) => {
+  postAuthStateToPage(Boolean(token));
+  ensureInjectJsIfLoggedIn();
+});
+
 try {
   if (chrome?.storage?.onChanged?.addListener) {
     chrome.storage.onChanged.addListener((changes, areaName) => {
       if (areaName !== "local") return;
       if (!changes?.authToken) return;
       cachedAuthToken = changes.authToken.newValue || null;
+      postAuthStateToPage(Boolean(cachedAuthToken));
+      // If user just logged in, inject on existing page without reload.
+      if (cachedAuthToken) ensureInjectJsIfLoggedIn();
     });
   }
 } catch {
@@ -171,6 +298,55 @@ function isNjbPreviewPage() {
   const path = (window.location.pathname || "").toLowerCase();
   if (!host.includes("naukri.com")) return false;
   return path.includes("/preview") || path.includes("/profile");
+}
+
+function isNhHiringDetailsPage() {
+  const host = (window.location.hostname || "").toLowerCase();
+  if (host !== "hiring.naukri.com") return false;
+  const path = window.location.pathname || "";
+  return /\/hiring\/[^/]+\/apply\/[^/?#]+/i.test(path);
+}
+
+function addNhBadgeToHiringDetails(candidateId) {
+  if (!isNhHiringDetailsPage()) return;
+  if (!candidateId) return;
+
+  // Avoid duplicates.
+  if (document.querySelector(".nh-matched-badge")) return;
+
+  ensurePulseAnimationStyle();
+
+  const badge = document.createElement("div");
+  badge.className = "nh-matched-badge";
+  badge.textContent = "✓";
+  badge.title = "Already in database - Click to view details";
+  badge.style.cssText = `
+    position: fixed;
+    top: 90px;
+    right: 18px;
+    width: 26px;
+    height: 26px;
+    background-color: #7f56d9;
+    border-radius: 50%;
+    color: white;
+    font-size: 14px;
+    font-weight: bold;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 999999;
+    animation: pulse 1.8s infinite;
+  `;
+
+  badge.addEventListener("click", (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const candidateUrl = `${WEB_APP_URL}/candidate-management/candidate-details/${candidateId}`;
+    window.open(candidateUrl, "_blank");
+  });
+
+  document.body.appendChild(badge);
 }
 
 function addNjbBadgeToPreview(candidateId) {
@@ -273,6 +449,12 @@ chrome.runtime.onMessage.addListener((message) => {
   addNjbBadgeToPreview(message?.candidateId ? String(message.candidateId) : "");
 });
 
+// Hiring details page tick after intercept+save (candidateId available)
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== "NH_DETAIL_BADGE") return;
+  addNhBadgeToHiringDetails(message?.candidateId ? String(message.candidateId) : "");
+});
+
 // Refresh badges after candidate is scraped/saved (background sends this).
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type !== "NJB_REFRESH_BADGES") return;
@@ -291,5 +473,4 @@ chrome.runtime.onMessage.addListener((message) => {
 
   observer.observe(document.documentElement, { childList: true, subtree: true });
 })();
-
-
+})();
