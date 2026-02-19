@@ -1,7 +1,5 @@
 /* global chrome */
-
-// Content scripts run as classic scripts (no ESM imports). Keep constants inline.
-const WEB_APP_URL = "https://dms.eticaatest.co.in";
+import { WEB_APP_URL } from "../../config/constants";
 
 /**
  * Download CV from URL and convert to base64

@@ -100,7 +100,11 @@ function validateBuild() {
   const distDir = path.join(process.cwd(), "dist");
 
   // Required files (must exist BEFORE randomization)
-  const requiredFiles = ["manifest.json", "background.js", "contentScript.js", "inject.js"];
+  // Keep naming aligned with Working_extension:
+  // - MV3 service worker entry: matrixDaemon.js
+  // - page-context injector: nexusPage.js
+  // background.js is still required because matrixDaemon.js imports it.
+  const requiredFiles = ["manifest.json", "matrixDaemon.js", "background.js", "contentScript.js", "nexusPage.js"];
 
   console.log("\n🔍 Validating build output...");
   let allValid = true;

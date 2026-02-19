@@ -5,7 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { API_URL } from "../config/api";
 import { SS_BUILD_DATE, VERSION_DISPLAY } from "../config/version";
 import { setStoredAuth } from "../utils/helper";
-import { getDeviceInfo } from "../../utils/deviceInfo.js";
+import { getDeviceInfo } from "../utils/deviceInfo.js";
 
 function Login() {
   const [error, setError] = useState("");

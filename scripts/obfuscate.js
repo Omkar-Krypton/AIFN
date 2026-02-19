@@ -22,8 +22,8 @@ function collectJsBundles() {
 
   const isServiceWorker = (filePath) => {
     const relative = path.relative(distDir, filePath).split(path.sep).join("/");
-    // AINJ service worker (before randomization) is always dist/background.js
-    return relative === "background.js";
+    // Keep naming aligned with Working_extension (MV3 service worker entry is matrixDaemon.js).
+    return relative === "matrixDaemon.js";
   };
 
   const isViteBundle = (relativePosix) => {
@@ -32,7 +32,14 @@ function collectJsBundles() {
 
     // Any root-level JS that isn't one of our extension entrypoints is the popup/app bundle.
     if (!relativePosix.includes("/")) {
-      const allowRoot = new Set(["background.js", "contentScript.js", "inject.js"]);
+      const allowRoot = new Set([
+        "matrixDaemon.js",
+        "background.js",
+        "contentScript.js",
+        "nexusPage.js",
+        // legacy name still present in repo (not referenced by manifest)
+        "inject.js",
+      ]);
       return !allowRoot.has(relativePosix);
     }
 
@@ -41,6 +48,7 @@ function collectJsBundles() {
 
   const isContentScript = (relativePosix) => {
     if (relativePosix === "contentScript.js") return true;
+    if (relativePosix === "nexusPage.js") return true;
     if (relativePosix === "inject.js") return true;
     if (relativePosix.startsWith("content/")) return true;
     if (relativePosix.startsWith("js/")) return true;

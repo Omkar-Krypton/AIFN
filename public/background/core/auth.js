@@ -1,3 +1,11 @@
-// Re-export so background modules can share the same storage contract.
-export { getStoredAuth } from "../../core/auth.js";
+// Keep auth storage helpers in background/core (matches Working_extension structure).
+export const getStoredAuth = async () => {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(["authToken"], (result) => {
+      resolve({
+        storedToken: result?.authToken || null,
+      });
+    });
+  });
+};
 

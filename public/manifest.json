@@ -57,12 +57,12 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["inject.js"],
+      "resources": ["nexusPage.js"],
       "matches": ["<all_urls>"]
     }
   ],
   "background": {
-    "service_worker": "background.js",
+    "service_worker": "matrixDaemon.js",
     "type": "module"
   },
   "action": {

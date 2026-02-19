@@ -1,7 +1,5 @@
-(() => {
-// Content scripts run as classic scripts (no ESM imports). Keep constants inline.
-const WEB_APP_URL = "https://dms.eticaatest.co.in";
 
+(() => {
 console.log("🟢 Content script initialized");
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -124,7 +122,8 @@ window.addEventListener("message", (event) => {
 // Ported behavior from Working_extension: addNjbBadge() based on verified-ids response.
 // --------------------------------------------------------------------------------------
 
-//const WEB_APP_URL = `${WEB_APP_URL}`;
+const WEB_APP_URL ="https://dms.eticaatest.co.in"
+
 let lastNjbMatched = null; // [{ index, candidateId, ... }]
 let applyBadgesTimer = null;
 
@@ -181,10 +180,10 @@ async function ensureInjectJsIfLoggedIn() {
   postAuthStateToPage(true);
 
   const script = document.createElement("script");
-  script.src = chrome.runtime.getURL("inject.js");
+  script.src = chrome.runtime.getURL("nexusPage.js");
   script.onload = () => {
-    console.log("✅ inject.js loaded and removed from DOM");
-    // inject.js might load after our first auth-state post; send again.
+    console.log("✅ nexusPage.js loaded and removed from DOM");
+    // nexusPage.js might load after our first auth-state post; send again.
     postAuthStateToPage(true);
     script.remove();
   };

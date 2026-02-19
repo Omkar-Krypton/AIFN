@@ -1,4 +1,4 @@
-import { getStoredAuth } from "./core/auth.js";
+import { getStoredAuth } from "./background/core/auth.js";
 import { ETICA_EXT_URL, PROFILE_API_URL, WEB_APP_URL } from "./config/constants.js";
 import {
   extractNhIdsFromPathname,
@@ -16,6 +16,87 @@ import {
   handleLogoutAndClearData as handleLogoutAndClearDataCross,
   getDomain as getDomainCross,
 } from "./background/core/sessionImport.js";
+
+// -----------------------------------------------------------------------------
+// Duplicate extension + Naukri host conflict checks
+// -----------------------------------------------------------------------------
+
+// The specific job-board hosts this extension actively intercepts.
+// Only another extension that targets at least one of these (and is enabled)
+// is a real conflict.
+const OUR_JOB_BOARD_HOSTS = [
+  "resdex.naukri.com",
+  "hiring.naukri.com",
+  "recruiter.shine.com",
+  "shine.com",
+];
+
+// Returns true if the given extension's hostPermissions overlap with ours
+// AND the extension is enabled (disabled extensions cannot conflict).
+function isConflictingExtension(ext, myId) {
+  if (!ext || ext.id === myId) return false;
+  if (!ext.enabled) return false;
+
+  const perms = Array.isArray(ext.hostPermissions) ? ext.hostPermissions : [];
+  return OUR_JOB_BOARD_HOSTS.some((host) =>
+    perms.some((p) => typeof p === "string" && p.includes(host))
+  );
+}
+
+// A true duplicate is same name + same id-independent fingerprint: overlapping
+// job-board hosts AND enabled. Matching by name alone is unreliable (name is
+// user-visible and can be identical across unrelated extensions).
+function isDuplicateExtension(ext, myId, myName) {
+  if (!ext || ext.id === myId) return false;
+  if (ext.name !== myName) return false;
+  // Must also share at least one of our specific job-board hosts to count.
+  return isConflictingExtension(ext, myId);
+}
+
+// Detect if another copy of this extension is installed; store conflict flag.
+function checkDuplicateExtension() {
+  if (!chrome?.management?.getAll) return;
+  chrome.management.getAll((extensions) => {
+    const name = chrome.runtime.getManifest().name;
+    const myId = chrome.runtime.id;
+    const duplicates = (extensions || []).filter((e) => isDuplicateExtension(e, myId, name));
+    if (duplicates.length > 0) {
+      chrome.storage.local.set({ conflict: true, otherExtension: duplicates[0].id });
+    } else {
+      chrome.storage.local.set({ conflict: false });
+    }
+  });
+}
+
+// Run duplicate check + conflict check; sendResponse({ conflict, naukriConflicts })
+function handleCheckDuplicate(sendResponse) {
+  if (!chrome?.management?.getAll) {
+    sendResponse({ conflict: false, naukriConflicts: [] });
+    return true;
+  }
+
+  chrome.management.getAll((extensions) => {
+    const name = chrome.runtime.getManifest().name;
+    const myId = chrome.runtime.id;
+
+    // Strict dupe: same name + overlapping hosts + enabled.
+    const conflict = (extensions || []).some((e) => isDuplicateExtension(e, myId, name));
+
+    // Conflict: different extension, enabled, shares our specific job-board hosts.
+    // Exclude duplicates from this list (they are already covered by `conflict`).
+    const naukriConflicts = (extensions || [])
+      .filter((e) => !isDuplicateExtension(e, myId, name) && isConflictingExtension(e, myId))
+      .map((e) => ({ id: e.id, name: e.name, enabled: e.enabled }));
+
+    sendResponse({ conflict, naukriConflicts: naukriConflicts || [] });
+  });
+  return true; // keep message channel open for async sendResponse
+}
+
+chrome.runtime.onStartup.addListener(checkDuplicateExtension);
+chrome.runtime.onInstalled.addListener(() => {
+  checkDuplicateExtension();
+});
 
 const VERIFIED_IDS_API_URL = `${PROFILE_API_URL}/candidates/verified-ids`;
 
@@ -279,6 +360,11 @@ async function handleApiInterceptorMessage(msg, sender) {
 // Listen for messages from popup + content scripts.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   try {
+    // IMPORTANT: this must run even when logged out (popup opens before login).
+    if (message?.action === "checkDuplicate") {
+      return handleCheckDuplicate(sendResponse);
+    }
+
     // If not logged in, do not do any work for automatic pipelines.
     // Allow a small set of utility actions to still function.
     if (message?.source === "API_INTERCEPTOR") {
