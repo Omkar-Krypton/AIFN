@@ -347,56 +347,14 @@ function ShareSession() {
     }
   };
 
-  const handleDeleteAllNaukriSessions = async () => {
-    setDeleting(true);
-    setError("");
-    setSuccess("");
-    try {
-      const { storedToken } = await getStoredAuth();
-      if (!storedToken) {
-        await logOut();
-        return navigate("/login");
-      }
-
-      const response = await fetch(`${API_URL}/api/ext/sessions/naukri`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${storedToken}` },
-      });
-
-      if (response.status === 401) {
-        await logOut();
-        return navigate("/login");
-      }
-
-      const resultData = await response.json();
-      if (response.ok) {
-        setSuccess("All Naukri sessions deleted successfully");
-      } else {
-        setError(resultData?.message || "Failed to delete Naukri sessions");
-      }
-    } catch (e) {
-      console.error("Error deleting Naukri sessions:", e);
-      setError("Failed to delete Naukri sessions: " + e.message);
-    } finally {
-      setDeleting(false);
-    }
-  };
+ 
 
   return (
     <div className="w-full max-w-[350px] mx-auto bg-transparent m-0 p-0">
       <Navbar />
       <div className="px-4 py-2 shadow-lg">
         <div className="flex items-center justify-between mb-3">
-          <h1 className="text-lg font-semibold text-[#475467]">Collaborate (Naukri/Shine)</h1>
-          <button
-            type="button"
-            disabled={deleting}
-            onClick={handleDeleteAllNaukriSessions}
-            className="text-[10px] px-2 py-1 rounded border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-60"
-            title="Delete all Naukri sessions"
-          >
-            {deleting ? "Deleting..." : "Delete Sessions"}
-          </button>
+          <h1 className="text-lg font-semibold text-[#475467]">Collaborate</h1>
         </div>
 
         {error && (

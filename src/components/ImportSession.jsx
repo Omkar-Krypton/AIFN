@@ -275,7 +275,7 @@ function ImportSession() {
 
       <div className="px-4 py-2 shadow-lg">
         <div className="flex justify-between items-center mb-4">
-          <h1 className="text-lg font-semibold text-[#475467]">Import Feature (Naukri/Shine)</h1>
+          <h1 className="text-lg font-semibold text-[#475467]">Import Feature</h1>
           <button
             onClick={handleRefresh}
             disabled={isRefreshing}

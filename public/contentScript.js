@@ -58,40 +58,164 @@ function triggerResdexCanScrapeCheck(reason = "") {
   }
 }
 
-function setupResdexUrlMonitoring() {
-  // popstate (back/forward)
-  window.addEventListener("popstate", () => setTimeout(() => triggerResdexCanScrapeCheck("popstate"), 100));
+// --------------------------------------------------------------------------------------
+// Resdex route change detection and verified-ids (same as Working_extension content/njb/tools.js)
+// Uses search state from URL (sid, pageNo, so) + popstate/pushState/replaceState/polling/visibility.
+// --------------------------------------------------------------------------------------
 
-  // pushState/replaceState (SPA navigation)
+function isResdexSearchPage() {
+  const host = (window.location.hostname || "").toLowerCase();
+  if (host !== "resdex.naukri.com") return false;
+  const path = (window.location.pathname || "").toLowerCase();
+  return path.includes("/v3/search") || path === "/v3/search";
+}
+
+function isResdexPreviewPage() {
+  const host = (window.location.hostname || "").toLowerCase();
+  if (host !== "resdex.naukri.com") return false;
+  const path = (window.location.pathname || "").toLowerCase();
+  return path.includes("/preview") || path.includes("/profile");
+}
+
+/** Extract search state from URL (sid, pageNo, so). Returns { sid, pageNo, so, key } or null. */
+function extractSearchState(url) {
+  try {
+    const urlObj = new URL(url);
+    const pathname = urlObj.pathname || "";
+    if (!pathname.includes("/v3/search") && pathname !== "/v3/search") return null;
+    const sid = urlObj.searchParams.get("sid") || "";
+    const pageNo = urlObj.searchParams.get("pageNo") || "1";
+    const so = urlObj.searchParams.get("so") || "";
+    return { sid, pageNo, so, key: `${sid}_${pageNo}_${so}` };
+  } catch {
+    return null;
+  }
+}
+
+function hasSearchStateChanged(newState, oldState) {
+  if (!newState) return false;
+  if (!oldState) return true;
+  return newState.key !== oldState.key;
+}
+
+function areSearchResultsLoaded() {
+  return !!(
+    document.querySelector(".list-container") ||
+    document.querySelector(".flex-row.tuple-top") ||
+    document.querySelector(".search-results") ||
+    document.querySelectorAll(".tuple-top").length > 0
+  );
+}
+
+/** Trigger verified-ids refresh + CAN_SCRAPE on Resdex search page (same points as Working_extension). */
+function triggerResdexVerifiedIdsAndCanScrape() {
+  if (!cachedAuthToken) return;
+  if (!isResdexSearchPage()) return;
+  try {
+    chrome.runtime.sendMessage(
+      { action: "REQUEST_NJB_VERIFIED_IDS_REFRESH", reason: "resdex_route_change" },
+      () => {}
+    );
+  } catch {
+    // ignore
+  }
+  triggerResdexCanScrapeCheck("resdex_search");
+}
+
+let resdexCurrentUrl = window.location.href;
+let resdexLastSearchState = null;
+
+function triggerApisForResdexSearchPage() {
+  if (!isResdexSearchPage() || isResdexPreviewPage()) return false;
+  const currentSearchState = extractSearchState(window.location.href);
+  const searchStateChanged = hasSearchStateChanged(currentSearchState, resdexLastSearchState);
+  if (!searchStateChanged && resdexLastSearchState !== null) return false;
+
+  resdexLastSearchState = currentSearchState;
+  triggerResdexVerifiedIdsAndCanScrape();
+  return true;
+}
+
+function handleResdexUrlChange() {
+  const newUrl = window.location.href;
+  const newPath = (window.location.pathname || "").toLowerCase();
+  const isSearchPage = newPath.includes("/v3/search");
+  const isPreviewPage = newPath.includes("/preview") || newPath.includes("/profile");
+
+  if (newUrl === resdexCurrentUrl) return;
+  resdexCurrentUrl = newUrl;
+
+  if (isSearchPage && !isPreviewPage) {
+    let triggered = triggerApisForResdexSearchPage();
+    if (triggered) return;
+    // Retry when results load (same as Working_extension)
+    let retryCount = 0;
+    const maxRetries = 15;
+    const retryInterval = 500;
+    const checkAndTrigger = () => {
+      retryCount++;
+      const resultsLoaded = areSearchResultsLoaded();
+      const currentState = extractSearchState(window.location.href);
+      const stateChanged = hasSearchStateChanged(currentState, resdexLastSearchState);
+      if (resultsLoaded && (stateChanged || resdexLastSearchState === null)) {
+        resdexLastSearchState = currentState;
+        triggerResdexVerifiedIdsAndCanScrape();
+      } else if (retryCount < maxRetries) {
+        setTimeout(checkAndTrigger, retryInterval);
+      }
+    };
+    setTimeout(checkAndTrigger, 300);
+  }
+}
+
+function setupResdexUrlMonitoring() {
+  window.addEventListener("popstate", () => setTimeout(handleResdexUrlChange, 100));
+
   const originalPushState = history.pushState;
   history.pushState = function (...args) {
     originalPushState.apply(history, args);
-    setTimeout(() => triggerResdexCanScrapeCheck("pushState"), 100);
+    setTimeout(handleResdexUrlChange, 100);
   };
-
   const originalReplaceState = history.replaceState;
   history.replaceState = function (...args) {
     originalReplaceState.apply(history, args);
-    setTimeout(() => triggerResdexCanScrapeCheck("replaceState"), 100);
+    setTimeout(handleResdexUrlChange, 100);
   };
 
-  // When tab becomes visible again
+  window.addEventListener("locationchange", () => setTimeout(handleResdexUrlChange, 100));
+
+  const urlPollInterval = setInterval(() => {
+    if (window.location.hostname.toLowerCase() !== "resdex.naukri.com") return;
+    if (window.location.href !== resdexCurrentUrl) handleResdexUrlChange();
+  }, 500);
+
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
-      setTimeout(() => triggerResdexCanScrapeCheck("visibility"), 50);
-    }
+    if (document.hidden) return;
+    if (!isResdexSearchPage() || isResdexPreviewPage()) return;
+    resdexCurrentUrl = window.location.href;
+    resdexLastSearchState = extractSearchState(window.location.href);
+    triggerResdexCanScrapeCheck("visibility");
+    setTimeout(() => triggerResdexVerifiedIdsAndCanScrape(), 500);
   });
 }
 
-// Initial check + monitoring (Resdex only)
+function initResdexSearchHandling() {
+  if ((window.location.hostname || "").toLowerCase() !== "resdex.naukri.com") return;
+  if (isResdexSearchPage() && !isResdexPreviewPage()) {
+    resdexLastSearchState = extractSearchState(window.location.href);
+    triggerResdexVerifiedIdsAndCanScrape();
+  }
+  setupResdexUrlMonitoring();
+}
+
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", () => {
     triggerResdexCanScrapeCheck("domcontentloaded");
-    setupResdexUrlMonitoring();
+    initResdexSearchHandling();
   });
 } else {
   triggerResdexCanScrapeCheck("init");
-  setupResdexUrlMonitoring();
+  initResdexSearchHandling();
 }
 
 // Listen messages from page
@@ -109,7 +233,7 @@ window.addEventListener("message", (event) => {
         console.log("✅ Message sent to background, response:", response);
       });
     } catch (e) {
-      console.error("❌ Error sending message to background:", e);
+      console.log("❌ Error sending message to background:", e);
     }
 
     // After intercept activity on Resdex, re-check rate limit (cached in background).
@@ -310,31 +434,39 @@ function addNhBadgeToHiringDetails(candidateId) {
   if (!isNhHiringDetailsPage()) return;
   if (!candidateId) return;
 
-  // Avoid duplicates.
   if (document.querySelector(".nh-matched-badge")) return;
 
   ensurePulseAnimationStyle();
+
+  const container = document.querySelector(".candidateDetailsHeading");
+  if (!container) return;
+
+  // make sure parent can hold absolute child
+  if (getComputedStyle(container).position === "static") {
+    container.style.position = "relative";
+  }
 
   const badge = document.createElement("div");
   badge.className = "nh-matched-badge";
   badge.textContent = "✓";
   badge.title = "Already in database - Click to view details";
+
   badge.style.cssText = `
-    position: fixed;
-    top: 90px;
-    right: 18px;
-    width: 26px;
-    height: 26px;
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 22px;
+    height: 22px;
     background-color: #7f56d9;
     border-radius: 50%;
     color: white;
-    font-size: 14px;
+    font-size: 13px;
     font-weight: bold;
-    display: inline-flex;
+    display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    z-index: 999999;
+    z-index: 10;
     animation: pulse 1.8s infinite;
   `;
 
@@ -345,7 +477,7 @@ function addNhBadgeToHiringDetails(candidateId) {
     window.open(candidateUrl, "_blank");
   });
 
-  document.body.appendChild(badge);
+  container.appendChild(badge);
 }
 
 function addNjbBadgeToPreview(candidateId) {

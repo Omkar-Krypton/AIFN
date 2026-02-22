@@ -225,7 +225,7 @@
     }
 
     naukriHiringResumeState.inFlight = true;
-    logNaukri("[NH] Calling download resume API", { resumeUrl: built.resumeUrl });
+    //logNaukri("[NH] Calling download resume API", { resumeUrl: built.resumeUrl });
 
     try {
       // Use XHR so it is captured by our existing XHR resume interceptor.
@@ -374,12 +374,12 @@
     }
 
     naukriResumeState.inFlight = true;
-    logNaukri("Calling download resume API", {
-      nowEpoch: built.nowEpoch,
-      hasATParam: built.resumeUrl.includes("?AT="),
-      sourceUrl,
-      resumeUrl: built.resumeUrl,
-    });
+    // logNaukri("Calling download resume API", {
+    //   nowEpoch: built.nowEpoch,
+    //   hasATParam: built.resumeUrl.includes("?AT="),
+    //   sourceUrl,
+    //   resumeUrl: built.resumeUrl,
+    // });
 
     try {
       // Use XHR (not fetch) so it matches the page's typical download flow and

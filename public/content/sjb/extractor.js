@@ -990,6 +990,15 @@ async function checkAndBlockIfNeeded() {
     };
 
     if (!result.canScrape) {
+      // Do not show popup or freeze for unauthorized / 0/0 (e.g. 401 on another device)
+      const isUnauthorizedStyle =
+        result.reason === "UNAUTHORIZED" ||
+        (Number(result.used) === 0 && Number(result.maxLimit) === 0);
+      if (isUnauthorizedStyle) {
+        sjb_isRateLimitBlocked = false;
+        hideRateLimitOverlay();
+        return true;
+      }
       sjb_isRateLimitBlocked = true;
       showRateLimitOverlay(result);
       blockAllInteractions();

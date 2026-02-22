@@ -219,10 +219,9 @@ async function handleApiInterceptorMessage(msg, sender) {
     (msg.url.includes("/jsprofile/download/resume") ||
       msg.url.includes("jsprofile/download/resume") ||
       isNhResumeDownloadApi(msg.url));
-  const isListingPage = typeof msg.pathname === "string" && msg.pathname.includes("search");
+  // Search results (tuples) can be intercepted while still on advSrch; accept whenever we have tuples.
   const hasTuples = Array.isArray(msg?.data?.tuples);
-
-  if (isListingPage && hasTuples) return sendListingCandidatesData(msg.data);
+  if (hasTuples) return sendListingCandidatesData(msg.data);
 
   if (isResumeApi) {
     const cvBuffer = typeof msg?.data?.cvBuffer === "string" ? msg.data.cvBuffer : "";
@@ -411,6 +410,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.action === "CHECK_SJB_IDS") {
       handleCheckSjbIds(message, sendResponse);
       return true;
+    }
+
+    // Content script on /v3/search (load, reload, or SPA nav from advSrch) asks to refresh verified-ids.
+    if (message?.action === "REQUEST_NJB_VERIFIED_IDS_REFRESH") {
+      (async () => {
+        try {
+          if (lastNjbVerifiedIdsPayload?.body) {
+            await postVerifiedIdsAndBroadcast(lastNjbVerifiedIdsPayload.body, true);
+          }
+          sendResponse({ ok: true });
+        } catch (e) {
+          sendResponse({ ok: false, error: String(e?.message || e) });
+        }
+      })();
+      return true; // async
     }
 
     // Verified-IDs / badge support (ported from Working_extension).
@@ -626,10 +640,30 @@ async function maybeSendNhCombinedCandidate(applicationId) {
       jobTitle: appDetail?.profileSummary || appDetail?.role || "",
       summary: appDetail?.summary || "",
       role: appDetail?.role || "",
-      farea: appDetail?.functionalArea || "",
       industryType: appDetail?.industry || "",
-      totalExperience: appDetail?.experience?.years != null ? String(appDetail.experience.years) : "",
-      rawTotalExperience: appDetail?.experience?.years != null ? String(appDetail.experience.years) : "",
+      // NH: treat 99 as placeholder and send 0; format as "Xy Ym" (e.g. 3 years 6 months → "3y 6m")
+      totalExperience: (() => {
+        const y = appDetail?.experience?.years;
+        if (y == null) return "";
+        if (y === 99) return "0";
+        const years = Number(y) || 0;
+        const months = Number(appDetail?.experience?.months) || 0;
+        const parts = [];
+        if (years > 0) parts.push(`${years}y`);
+        if (months > 0) parts.push(`${months}m`);
+        return parts.length ? parts.join(" ") : "0";
+      })(),
+      rawTotalExperience: (() => {
+        const y = appDetail?.experience?.years;
+        if (y == null) return "";
+        if (y === 99) return "0";
+        const years = Number(y) || 0;
+        const months = Number(appDetail?.experience?.months) || 0;
+        const parts = [];
+        if (years > 0) parts.push(`${years}y`);
+        if (months > 0) parts.push(`${months}m`);
+        return parts.length ? parts.join(" ") : "0";
+      })(),
       noticePeriod: appDetail?.noticePeriod || "",
       empStatus: appDetail?.isCurrentlyUnemployed ? "unemployed" : "",
       jobType: "",
@@ -643,6 +677,15 @@ async function maybeSendNhCombinedCandidate(applicationId) {
       birthDate: appDetail?.otherDetails?.personal?.dob || "",
       gender: appDetail?.otherDetails?.personal?.gender || "",
       maritalStatus: appDetail?.otherDetails?.personal?.maritalStatus || "",
+      // NH: desired job details
+      jobType: appDetail?.otherDetails?.desiredJD?.jobType || "",
+      empStatus: appDetail?.otherDetails?.desiredJD?.employerStatus || (appDetail?.isCurrentlyUnemployed ? "unemployed" : ""),
+      // NH: affirmative / caste
+      caste: appDetail?.otherDetails?.affirmative?.category || "",
+      physicallyChallenged: appDetail?.otherDetails?.affirmative?.physicallyChallenged || "",
+      // NH: address
+      addressWithPin: appDetail?.otherDetails?.address?.addressWithPin || "",
+      homeTown: appDetail?.otherDetails?.address?.homeTown || "",
       modifiedDate: appDetail?.addedOn ? String(appDetail.addedOn).slice(0, 10) : "",
       viewDate: appDetail?.lastActiveOnResdex ? String(appDetail.lastActiveOnResdex).slice(0, 10) : "",
       // Shapes expected by mapper:
@@ -682,13 +725,45 @@ async function maybeSendNhCombinedCandidate(applicationId) {
           ability: parts.join(" "),
         };
       }),
-      projects: [],
+      // NH: candidateProjects → same shape as Resdex projects for mapper
+      projects: (Array.isArray(appDetail?.candidateProjects) ? appDetail.candidateProjects : []).map((p) => ({
+        project: p?.project || "",
+        client: p?.client || "",
+        site: p?.site || "",
+        details: p?.projectDetails || "",
+        role: p?.employmentType || p?.employmentNature || "",
+        employmentNature: p?.employmentType || p?.employmentNature || "",
+        skills: p?.skill || "",
+        startDate: p?.startDate || "",
+        endDate: p?.endDate || "",
+        startYearMillis: null,
+        endYearMillis: null,
+      })),
       certifications: [],
-      skills: [],
+      // NH skills: array of { skillLabel, experienceYear, experienceMonth } → same shape as Resdex for mapper (Key Skills / IT Skills / May Also Know)
+      skills: (Array.isArray(appDetail?.skills) ? appDetail.skills : []).map((s) => {
+        const y = s?.experienceYear != null ? Number(s.experienceYear) : null;
+        const m = s?.experienceMonth != null ? Number(s.experienceMonth) : null;
+        let experienceTimeLable = "";
+        if (typeof y === "number" && !Number.isNaN(y) && y > 0) {
+          experienceTimeLable = m && !Number.isNaN(m) && m > 0 ? `${y}.${m}y` : `${y}y`;
+        }
+        return {
+          skill: { label: s?.skillLabel || "" },
+          experienceTimeLable,
+        };
+      }),
     };
 
     const payload = mapProfileResponseToCandidatesPayload(profileLike, contactLike);
     payload.source = "NH";
+    // NH does not provide desired position or functional area; do not send them.
+    if (payload.job_preference) {
+      payload.job_preference.desired_job_type = { job_type: "", employment_status: "" };
+    }
+    if (payload.professional_summary) {
+      payload.professional_summary.department = "";
+    }
 
     const res = await fetch(CANDIDATES_API_URL, {
         method: "POST",
@@ -740,14 +815,10 @@ async function maybeSendNhCombinedCandidate(applicationId) {
         );
       }
 
-      // Paint ✓ on the Hiring details page.
-      try {
-        const tabId = nhTabIdByApplicationId.get(appId);
-        if (tabId) {
-          chrome.tabs.sendMessage(tabId, { type: "NH_DETAIL_BADGE", candidateId: String(candidateId) });
-        }
-      } catch {
-        // ignore
+      // Paint ✓ on the Hiring details page. Catch sendMessage rejection (tab may have no content script).
+      const tabId = nhTabIdByApplicationId.get(appId);
+      if (tabId) {
+        chrome.tabs.sendMessage(tabId, { type: "NH_DETAIL_BADGE", candidateId: String(candidateId) }).catch(() => {});
       }
     }
 
@@ -984,11 +1055,43 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
     if (!exists) contacts.push(c);
   }
 
+  // Map a single project to payload shape (reused for nested and top-level).
+  function mapOneProject(p) {
+    const start = millisToIsoDate(p?.startYearMillis) || p?.startDate || "";
+    const end = millisToIsoDate(p?.endYearMillis) || p?.endDate || "";
+    const description = p?.details || "";
+    const technologies = [];
+    if (typeof p?.skills === "string" && p.skills.trim()) {
+      p.skills.split(",").forEach((seg) => {
+        const t = seg.trim();
+        if (t) technologies.push(t);
+      });
+    }
+    return {
+      title: p?.project || "",
+      description,
+      role: p?.employmentNature || "",
+      client: p?.client || "",
+      site: p?.site || "",
+      start_date: start,
+      end_date: end,
+      technologies_used: technologies,
+      url: null,
+    };
+  }
+
+  const allProjects = Array.isArray(profile?.projects) ? profile.projects : [];
   const workExperiences = Array.isArray(profile?.workExperiences) ? profile.workExperiences : [];
+  const experienceIds = new Set(workExperiences.map((we) => we?.experienceId).filter(Boolean));
+
   const mappedWorkExperiences = workExperiences.map((we) => {
     const isCurrent =
       (we?.empTypeLable || "").toString().toLowerCase().includes("current") ||
       (we?.endDate || "").toString().toLowerCase().includes("till");
+    // NJ: projects linked to this experience via eduExpId === experienceId
+    const linkedProjects = allProjects.filter(
+      (p) => p?.eduExpId != null && p?.eduExpId === we?.experienceId
+    );
     return {
       company_name: we?.organization || "",
       company_description: "",
@@ -999,8 +1102,16 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
       end_date: isCurrent ? null : (millisToIsoDate(we?.endYearMillis) || we?.endDate || ""),
       is_current: isCurrent,
       work_summary: we?.profile || "",
+      projects: linkedProjects.map(mapOneProject),
     };
   });
+
+  // Top-level projects: only those not linked to any work experience (eduExpId 0, null, or unknown)
+  const unlinkedProjects = allProjects.filter((p) => {
+    const eid = p?.eduExpId;
+    return eid == null || eid === 0 || !experienceIds.has(eid);
+  });
+  const mappedProjects = unlinkedProjects.map(mapOneProject);
 
   const educations = Array.isArray(profile?.educations) ? profile.educations : [];
   const mappedEducations = educations.map((ed) => {
@@ -1036,32 +1147,6 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
     };
   });
 
-  const projects = Array.isArray(profile?.projects) ? profile.projects : [];
-  const mappedProjects = projects.map((p) => {
-    const start = millisToIsoDate(p?.startYearMillis) || "";
-    const end = millisToIsoDate(p?.endYearMillis) || "";
-    const description = p?.details || "";
-
-    const technologies = [];
-    if (typeof p?.skills === "string" && p.skills.trim()) {
-      p.skills.split(",").forEach((seg) => {
-        const t = seg.trim();
-        if (t) technologies.push(t);
-      });
-    }
-
-    return {
-      title: p?.project || "",
-      description,
-      role: description ? `Project description: ${description}` : "",
-      client: "",
-      start_date: start,
-      end_date: end,
-      technologies_used: technologies,
-      url: null,
-    };
-  });
-
   const certifications = Array.isArray(profile?.certifications)
     ? profile.certifications
     : [];
@@ -1080,20 +1165,36 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
     };
   });
 
+  // Parse "4y", "3.5y" etc. → integer years (0 if not parseable).
+  function parseYearsFromLabel(label) {
+    if (!label) return undefined;
+    const n = parseFloat(String(label).replace(/[^\d.]/g, ""));
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined;
+  }
+
   const skillsList = [];
-  keywords.forEach((k) => skillsList.push({ skill_name: k.trim(), category: null }));
+
+  // 1. Key Skills – from comma-separated `keywords` field.
+  keywords.forEach((k) => {
+    const name = k.trim();
+    if (name) skillsList.push({ skill_name: name, proficiency_level: "", skill_type: "Key Skills" });
+  });
+
+  // 2. IT Skills – from structured `skills` array (includes years_of_experience).
   (profile?.skills || []).forEach((s) => {
     const label = s?.skill?.label || "";
-    if (label && !skillsList.some((x) => x.skill_name === label)) {
-      skillsList.push({ skill_name: label, category: "it_skills" });
-    }
+    if (!label) return;
+    const yearsOfExp = parseYearsFromLabel(s?.experienceTimeLable);
+    const entry = { skill_name: label, proficiency_level: "", skill_type: "IT Skills" };
+    if (yearsOfExp !== undefined) entry.years_of_experience = yearsOfExp;
+    skillsList.push(entry);
   });
+
+  // 3. May Also Know – from comma-separated `displayKeywords` field.
   const displayKw = splitCommaValues(profile?.displayKeywords || "");
   displayKw.forEach((k) => {
     const name = k.trim();
-    if (name && !skillsList.some((x) => x.skill_name === name)) {
-      skillsList.push({ skill_name: name, category: "may_also_know" });
-    }
+    if (name) skillsList.push({ skill_name: name, proficiency_level: "", skill_type: "May Also Know" });
   });
 
   const lastActiveDate = profile?.viewDate
@@ -1108,7 +1209,7 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
     avatar: "https://static.naukimg.com/s/7/112/i/defaultAvatar.a0a6df38.svg",
     source: "NJ",
     headline: buildHeadline(profile) || profile?.jobTitle || "",
-    designation: profile?.role || (workExperiences[0]?.designation) || "",
+    designation: (workExperiences[0]?.designation) || profile?.role || "",
     date_of_birth: toIsoDateString(profile?.birthDate),
     place_of_birth: "",
     gender: profile?.gender || "",
@@ -1116,9 +1217,9 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
     religion: "",
     mother_tongue: "",
     marital_status: profile?.maritalStatus || "",
-    category: "General",
+    category: profile?.caste || "",
     notice_period: abbreviateNoticePeriod(profile?.noticePeriod) || "",
-    physically_challenged: "",
+    physically_challenged: profile?.physicallyChallenged ? String(profile.physicallyChallenged).toLowerCase() : "",
     desired_job_type: {
       job_type: profile?.jobType || "",
       employment_status: profile?.empStatus || "",
@@ -1136,8 +1237,8 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
     addresses: [
       {
         address_type: "current",
-        street: "",
-        city: profile?.city || "",
+        street: profile?.addressWithPin || "",
+        city: profile?.city || profile?.homeTown || "",
         state: "",
         postal_code: profile?.pin || "",
         country: "",
@@ -1153,7 +1254,6 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
       total_experience_years: profile?.totalExperience || "",
     },
     job_preference: {
-      desired_position: profile?.role || "",
       desired_job_type: profile?.jobType || "",
       preferred_locations: preferredLocations,
       willing_to_relocate: false,
@@ -1161,7 +1261,6 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
       notice_period: abbreviateNoticePeriod(profile?.noticePeriod) || "",
       reason_for_change: null,
       earliest_joining_date: null,
-      functional_area: profile?.farea || "",
       shift_type: null,
       current_location: profile?.city || "",
     },
@@ -1266,18 +1365,13 @@ async function maybeSendCombinedCandidateToCandidatesApi(userId) {
         );
       }
 
-      // Preview-page ✓ badge (same idea as Working_extension addNjbBadge on preview):
-      // send candidateId to the preview tab that triggered the intercept.
-      try {
-        const tabId = previewTabIdByUserId.get(String(userId)) || latestPreviewTabId;
-        if (tabId) {
-          chrome.tabs.sendMessage(tabId, {
-            type: "NJB_PREVIEW_BADGE",
-            candidateId: String(candidateId),
-          });
-        }
-      } catch {
-        // ignore
+      // Preview-page ✓ badge. Catch sendMessage rejection (tab may have no content script).
+      const tabId = previewTabIdByUserId.get(String(userId)) || latestPreviewTabId;
+      if (tabId) {
+        chrome.tabs.sendMessage(tabId, {
+          type: "NJB_PREVIEW_BADGE",
+          candidateId: String(candidateId),
+        }).catch(() => {});
       }
 
       // Refresh verified-ids (for list badges) using the last Interceptor payload ONLY.
@@ -1300,11 +1394,7 @@ async function maybeSendCombinedCandidateToCandidatesApi(userId) {
         });
         for (const tab of naukriTabs) {
           if (!tab?.id) continue;
-          try {
-            chrome.tabs.sendMessage(tab.id, { type: "NJB_REFRESH_BADGES" });
-          } catch {
-            // ignore
-          }
+          chrome.tabs.sendMessage(tab.id, { type: "NJB_REFRESH_BADGES" }).catch(() => {});
         }
       } catch {
         // ignore
@@ -1544,12 +1634,7 @@ async function postVerifiedIdsAndBroadcast(payload, force) {
 
     for (const tab of naukriTabs) {
       if (!tab?.id) continue;
-      try {
-        // Always send; content script will route-guard to /v3/search.
-        chrome.tabs.sendMessage(tab.id, { type: "NJB_VERIFIED_IDS_MATCHES", matched });
-      } catch {
-        // ignore
-      }
+      chrome.tabs.sendMessage(tab.id, { type: "NJB_VERIFIED_IDS_MATCHES", matched }).catch(() => {});
     }
   } catch {
     // ignore parse/forward errors

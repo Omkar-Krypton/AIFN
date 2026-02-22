@@ -843,7 +843,7 @@
           installCvDownloadBlocker();
           // Only block downloads briefly; still allow normal page actions afterward.
           window.__api_interceptor_block_downloads_until = Date.now() + 15000;
-
+         
           console.log("🎯 Found 'Download CV' button:", button);
           console.log("🖱️  Auto-clicking Download CV button to trigger resume API...");
           button.click();

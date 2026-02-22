@@ -1,5 +1,5 @@
 /* global chrome */
-import { WEB_APP_URL } from "../../config/constants";
+const WEB_APP_URL = "https://dms.eticaatest.co.in"
 
 /**
  * Download CV from URL and convert to base64

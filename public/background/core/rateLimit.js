@@ -42,6 +42,11 @@ export async function checkCanScrape(jobBoard) {
         },
       });
 
+      // 401/403 = session invalid (e.g. logged out on another device). Do not show popup or freeze.
+      if (userResponse.status === 401 || userResponse.status === 403) {
+        return { canScrape: true, reason: "UNAUTHORIZED" };
+      }
+
       if (userResponse.ok) {
         const userData = await userResponse.json().catch(() => ({}));
         customerId = userData?.data?.data?.customerId || userData?.data?.customerId || null;
@@ -68,7 +73,11 @@ export async function checkCanScrape(jobBoard) {
     });
 
     if (!response.ok) {
-      // If API fails, allow scraping to avoid blocking users due to API issues
+      // 401/403 = unauthorized (e.g. session invalid). Do not show popup or freeze.
+      if (response.status === 401 || response.status === 403) {
+        return { canScrape: true, reason: "UNAUTHORIZED" };
+      }
+      // Other API errors: allow scraping to avoid blocking users
       return { canScrape: true, reason: "API_ERROR" };
     }
 
@@ -142,6 +151,7 @@ function shouldFreezeForRateLimit(result) {
     "INVALID_TOKEN",
     "NO_USER_ID",
     "NO_CUSTOMER_ID",
+    "UNAUTHORIZED",
     "SKIP_HOST",
     "SKIP_SHINE_PATH",
     "SKIP_RESTDEX_PATH",
