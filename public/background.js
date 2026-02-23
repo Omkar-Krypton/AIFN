@@ -641,28 +641,26 @@ async function maybeSendNhCombinedCandidate(applicationId) {
       summary: appDetail?.summary || "",
       role: appDetail?.role || "",
       industryType: appDetail?.industry || "",
-      // NH: treat 99 as placeholder and send 0; format as "Xy Ym" (e.g. 3 years 6 months → "3y 6m")
+      // NH: treat 99 as placeholder and send 0; format as "Xy Ym" (e.g. 4 months → "0y 4m", 3y 6m → "3y 6m")
       totalExperience: (() => {
         const y = appDetail?.experience?.years;
         if (y == null) return "";
-        if (y === 99) return "0";
+        if (y === 99) return "0y";
         const years = Number(y) || 0;
         const months = Number(appDetail?.experience?.months) || 0;
-        const parts = [];
-        if (years > 0) parts.push(`${years}y`);
-        if (months > 0) parts.push(`${months}m`);
-        return parts.length ? parts.join(" ") : "0";
+        const parts = [years + "y"];
+        if (months > 0) parts.push(months + "m");
+        return parts.join(" ");
       })(),
       rawTotalExperience: (() => {
         const y = appDetail?.experience?.years;
         if (y == null) return "";
-        if (y === 99) return "0";
+        if (y === 99) return "0y";
         const years = Number(y) || 0;
         const months = Number(appDetail?.experience?.months) || 0;
-        const parts = [];
-        if (years > 0) parts.push(`${years}y`);
-        if (months > 0) parts.push(`${months}m`);
-        return parts.length ? parts.join(" ") : "0";
+        const parts = [years + "y"];
+        if (months > 0) parts.push(months + "m");
+        return parts.join(" ");
       })(),
       noticePeriod: appDetail?.noticePeriod || "",
       empStatus: appDetail?.isCurrentlyUnemployed ? "unemployed" : "",
@@ -674,7 +672,7 @@ async function maybeSendNhCombinedCandidate(applicationId) {
       expectedCtcType: "INR",
       rawExpectedCtc: expCtcAbs > 0 ? String(expCtcAbs / 100000) : "",
       expectedCtcValue: expCtcAbs > 0 ? String(expCtcAbs / 100000) : "",
-      birthDate: appDetail?.otherDetails?.personal?.dob || "",
+      birthDate: toYyyyMmDd(appDetail?.otherDetails?.personal?.dob) || "",
       gender: appDetail?.otherDetails?.personal?.gender || "",
       maritalStatus: appDetail?.otherDetails?.personal?.maritalStatus || "",
       // NH: desired job details
@@ -686,8 +684,8 @@ async function maybeSendNhCombinedCandidate(applicationId) {
       // NH: address
       addressWithPin: appDetail?.otherDetails?.address?.addressWithPin || "",
       homeTown: appDetail?.otherDetails?.address?.homeTown || "",
-      modifiedDate: appDetail?.addedOn ? String(appDetail.addedOn).slice(0, 10) : "",
-      viewDate: appDetail?.lastActiveOnResdex ? String(appDetail.lastActiveOnResdex).slice(0, 10) : "",
+      modifiedDate: toYyyyMmDd(appDetail?.addedOn) || "",
+      viewDate: toYyyyMmDd(appDetail?.lastActiveOnResdex) || "",
       // Shapes expected by mapper:
       workExperiences: workExperiences.map((we) => {
         const isCurrent = String(we?.current || "") === "1" || we?.workingTo == null;
@@ -695,8 +693,8 @@ async function maybeSendNhCombinedCandidate(applicationId) {
           organization: we?.company || "",
           designation: we?.designation || "",
           profile: we?.jobProfile || "",
-          startDate: we?.workingFrom || "",
-          endDate: isCurrent ? "Till Date" : (we?.workingTo || ""),
+          startDate: toYyyyMmDd(we?.workingFrom) || "",
+          endDate: isCurrent ? "Till Date" : (toYyyyMmDd(we?.workingTo) || ""),
           empTypeLable: isCurrent ? "Current" : "",
           startYearMillis: null,
           endYearMillis: null,
@@ -734,8 +732,8 @@ async function maybeSendNhCombinedCandidate(applicationId) {
         role: p?.employmentType || p?.employmentNature || "",
         employmentNature: p?.employmentType || p?.employmentNature || "",
         skills: p?.skill || "",
-        startDate: p?.startDate || "",
-        endDate: p?.endDate || "",
+        startDate: toYyyyMmDd(p?.startDate) || "",
+        endDate: toYyyyMmDd(p?.endDate) || "",
         startYearMillis: null,
         endYearMillis: null,
       })),
@@ -877,6 +875,31 @@ function toIsoDateString(input) {
   return formatLocalDateString(d);
 }
 
+/** Normalize any date to yyyy-mm-dd for NJ/NH backend. Accepts millis, ISO string, dd-mm-yyyy, etc. */
+function toYyyyMmDd(value) {
+  if (value == null || value === "") return "";
+  if (typeof value === "number") {
+    const s = millisToIsoDate(value);
+    return s != null ? s : "";
+  }
+  const s = String(value).trim();
+  if (!s) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) return formatLocalDateString(d);
+  const dmy = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
+  if (dmy) {
+    const [, day, month, year] = dmy;
+    const m = parseInt(month, 10);
+    const d2 = parseInt(day, 10);
+    const y = parseInt(year, 10);
+    if (m >= 1 && m <= 12 && d2 >= 1 && d2 <= 31 && y >= 1900 && y <= 2100) {
+      return `${y}-${String(m).padStart(2, "0")}-${String(d2).padStart(2, "0")}`;
+    }
+  }
+  return "";
+}
+
 function calcAgeFromIsoDate(isoDate) {
   if (!isoDate) return "";
   const d = new Date(isoDate);
@@ -896,13 +919,58 @@ function splitCommaValues(input) {
     .filter(Boolean);
 }
 
-/** "2 Months" -> "2M", "1 Month" -> "1M" */
+/**
+ * Normalize notice period for NJ/NJB payload: 0M, 1M, 2M, 15D, 30D, 14D, etc.
+ * Immediate Joiner → 0M; X month(s) → XM; X week(s) → (X*7)D; X day(s) [or less] → XD; else trimmed.
+ */
 function abbreviateNoticePeriod(np) {
   if (!np || typeof np !== "string") return "";
   const s = np.trim();
-  const m = s.match(/^(\d+)\s*month(s)?$/i);
-  if (m) return m[1] + "M";
+  if (!s) return "";
+
+  if (/immediate\s+join(er)?/i.test(s)) return "0M";
+
+  const monthMatch = s.match(/(\d+)\s*month(s)?/i);
+  if (monthMatch) return monthMatch[1] + "M";
+
+  const weekMatch = s.match(/(\d+)\s*week(s)?/i);
+  if (weekMatch) {
+    const weeks = parseInt(weekMatch[1], 10);
+    if (Number.isFinite(weeks)) return String(weeks * 7) + "D";
+  }
+
+  const dayMatch = s.match(/(\d+)\s*day(s)?/i);
+  if (dayMatch) return dayMatch[1] + "D";
+
   return s;
+}
+
+/**
+ * Normalize total experience to "Xy Ym" for NJ/NH. E.g. "4m" or "4 months" → "0y 4m"; "4" → "4y"; "4y 6m" → "4y 6m".
+ */
+function normalizeTotalExperienceToYm(raw) {
+  if (!raw || typeof raw !== "string") return "";
+  const s = raw.trim();
+  if (!s) return "";
+
+  let years = 0;
+  let months = 0;
+
+  const yMatch = s.match(/(\d+)\s*y/i);
+  const mMatch = s.match(/(\d+)\s*m(?!\s*y)/i) || s.match(/(\d+)\s*month/i);
+  if (yMatch) years = parseInt(yMatch[1], 10) || 0;
+  if (mMatch) months = parseInt(mMatch[1], 10) || 0;
+
+  if (!yMatch && !mMatch) {
+    const numOnly = s.match(/^\d+$/);
+    if (numOnly) return numOnly[0] + "y";
+    return s;
+  }
+
+  const parts = [];
+  parts.push(`${years}y`);
+  if (months > 0) parts.push(`${months}m`);
+  return parts.join(" ");
 }
 
 /** Millis to YYYY-MM-DD (local date); null/0 -> null */
@@ -1015,16 +1083,22 @@ function extractOnlineProfileLinksContacts(profile) {
   const seenTypes = new Set();
 
   for (const item of links) {
-    const url = typeof item?.url === "string" ? item.url.trim() : "";
-    if (!url) continue;
-
+    const rawUrl = typeof item?.url === "string" ? item.url.trim() : "";
+    if (!rawUrl) continue;
+    const url = rawUrl.startsWith("http") ? rawUrl : "https://" + rawUrl.replace(/^\/+/, "");
+    const urlLower = url.toLowerCase();
     const profileName = typeof item?.profile === "string" ? item.profile.trim().toLowerCase() : "";
     let contact_type = "";
 
-    if (profileName.includes("linkedin")) contact_type = "linkedin_url";
-    else if (profileName.includes("github")) contact_type = "github_url";
-    else if (profileName.includes("instagram")) contact_type = "instagram";
-    else if (profileName.includes("facebook")) contact_type = "facebook";
+    if (profileName.includes("linkedin") || urlLower.includes("linkedin")) contact_type = "linkedin_url";
+    else if (profileName.includes("github") || urlLower.includes("github")) contact_type = "github_url";
+    else if (profileName.includes("instagram") || urlLower.includes("instagram")) contact_type = "instagram";
+    else if (profileName.includes("facebook") || urlLower.includes("facebook")) contact_type = "facebook";
+    else if (profileName.includes("behance") || urlLower.includes("behance")) contact_type = "behance";
+    else if (profileName.includes("dribble") || profileName.includes("dribbble") || urlLower.includes("dribbble")) contact_type = "dribble";
+    else if (profileName.includes("leetcode") || urlLower.includes("leetcode")) contact_type = "leetcode";
+    else if (profileName.includes("geeksforgeeks") || profileName.includes("geeks for geeks") || urlLower.includes("geeksforgeeks")) contact_type = "geeksforgeeks";
+    else if (profileName.includes("portfolio") || urlLower.includes("portfolio")) contact_type = "portfolio";
     else continue; // ignore unknown profile types
 
     if (seenTypes.has(contact_type)) continue;
@@ -1057,8 +1131,8 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
 
   // Map a single project to payload shape (reused for nested and top-level).
   function mapOneProject(p) {
-    const start = millisToIsoDate(p?.startYearMillis) || p?.startDate || "";
-    const end = millisToIsoDate(p?.endYearMillis) || p?.endDate || "";
+    const start = millisToIsoDate(p?.startYearMillis) || toYyyyMmDd(p?.startDate) || "";
+    const end = millisToIsoDate(p?.endYearMillis) || toYyyyMmDd(p?.endDate) || "";
     const description = p?.details || "";
     const technologies = [];
     if (typeof p?.skills === "string" && p.skills.trim()) {
@@ -1081,13 +1155,21 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
   }
 
   const allProjects = Array.isArray(profile?.projects) ? profile.projects : [];
-  const workExperiences = Array.isArray(profile?.workExperiences) ? profile.workExperiences : [];
+  // Resdex jsprofile: use fullWorkExperiences (full-time + internship with expType F/I); else workExperiences (NH etc.)
+  const workExperiences = Array.isArray(profile?.fullWorkExperiences)
+    ? profile.fullWorkExperiences
+    : Array.isArray(profile?.workExperiences)
+      ? profile.workExperiences
+      : [];
   const experienceIds = new Set(workExperiences.map((we) => we?.experienceId).filter(Boolean));
 
   const mappedWorkExperiences = workExperiences.map((we) => {
     const isCurrent =
       (we?.empTypeLable || "").toString().toLowerCase().includes("current") ||
       (we?.endDate || "").toString().toLowerCase().includes("till");
+    // Resdex fullWorkExperiences: expType "F" = full time, "I" = internship
+    const expType = (we?.expType || "").toString().toUpperCase();
+    const employment_status = expType === "I" ? "internship" : expType === "F" ? "full time" : "";
     // NJ: projects linked to this experience via eduExpId === experienceId
     const linkedProjects = allProjects.filter(
       (p) => p?.eduExpId != null && p?.eduExpId === we?.experienceId
@@ -1098,10 +1180,11 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
       company_website: "",
       location: "",
       job_title: we?.designation || "",
-      start_date: millisToIsoDate(we?.startYearMillis) || we?.startDate || "",
-      end_date: isCurrent ? null : (millisToIsoDate(we?.endYearMillis) || we?.endDate || ""),
+      start_date: millisToIsoDate(we?.startYearMillis) || toYyyyMmDd(we?.startDate) || "",
+      end_date: isCurrent ? null : (millisToIsoDate(we?.endYearMillis) || toYyyyMmDd(we?.endDate) || null),
       is_current: isCurrent,
       work_summary: we?.profile || "",
+      employment_status,
       projects: linkedProjects.map(mapOneProject),
     };
   });
@@ -1153,12 +1236,12 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
   const mappedCertifications = certifications.map((c) => {
     const rawExpiry = c?.expiryDate || "";
     const expiry =
-      rawExpiry && rawExpiry !== "00-0000" ? rawExpiry : null;
+      rawExpiry && rawExpiry !== "00-0000" ? (toYyyyMmDd(rawExpiry) || rawExpiry) : null;
 
     return {
       name: c?.course || "",
       issuing_organization: c?.certificationBody || c?.vendor || "",
-      issue_date: c?.issueDate || null,
+      issue_date: toYyyyMmDd(c?.issueDate) || null,
       expiry_date: expiry,
       credential_id: c?.completionId || "",
       url: c?.certificateUrl || "",
@@ -1197,11 +1280,7 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
     if (name) skillsList.push({ skill_name: name, proficiency_level: "", skill_type: "May Also Know" });
   });
 
-  const lastActiveDate = profile?.viewDate
-    ? toIsoDateString(profile.viewDate)
-    : profile?.activeDate
-      ? String(profile.activeDate).slice(0, 10)
-      : "";
+  const lastActiveDate = toYyyyMmDd(profile?.viewDate) || toYyyyMmDd(profile?.activeDate) || "";
 
   return {
     title: "",
@@ -1210,7 +1289,7 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
     source: "NJ",
     headline: buildHeadline(profile) || profile?.jobTitle || "",
     designation: (workExperiences[0]?.designation) || profile?.role || "",
-    date_of_birth: toIsoDateString(profile?.birthDate),
+    date_of_birth: toYyyyMmDd(profile?.birthDate) || "",
     place_of_birth: "",
     gender: profile?.gender || "",
     nationality: [],
@@ -1225,8 +1304,8 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
       employment_status: profile?.empStatus || "",
     },
     work_authority: profile?.workStatusOther ? [profile.workStatusOther] : [],
-    total_experience_years: profile?.totalExperience || profile?.rawTotalExperience || "",
-    modified_at: profile?.modifiedDate || "",
+    total_experience_years: normalizeTotalExperienceToYm(profile?.totalExperience || profile?.rawTotalExperience || "") || "",
+    modified_at: toYyyyMmDd(profile?.modifiedDate) || "",
     last_active: lastActiveDate,
     current_ctc: formatCtcDisplay(profile),
     expected_ctc: (profile?.expectedCtcValue && parseFloat(profile.expectedCtcValue) > 0)
@@ -1251,7 +1330,7 @@ function mapProfileResponseToCandidatesPayload(profile, contactDetails) {
       role: profile?.role || "",
       department: profile?.farea || "",
       industry: profile?.industryType || "",
-      total_experience_years: profile?.totalExperience || "",
+      total_experience_years: normalizeTotalExperienceToYm(profile?.totalExperience || profile?.rawTotalExperience || "") || "",
     },
     job_preference: {
       desired_job_type: profile?.jobType || "",

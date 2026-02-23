@@ -12,5 +12,5 @@ export const getBuildDateDisplay = () => {
 };
 
 // Static release date label (matches Working_extension behavior)
-export const SS_BUILD_DATE = "30-01-2025";
+export const SS_BUILD_DATE = "23-02-2026";
 

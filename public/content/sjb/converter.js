@@ -9,6 +9,7 @@
       ...(sjbProfile.linkedin_url
         ? [{ contact_type: "linkedin_url", contact_value: sjbProfile.linkedin_url }]
         : []),
+      ...(sjbProfile.github ? [{ contact_type: "github", contact_value: sjbProfile.github }] : []),
     ];
     const addresses = sjbProfile.location
       ? [{ address_type: "current", street: "", city: sjbProfile.location, state: "", postal_code: "", country: "India" }]
@@ -152,7 +153,6 @@
         industry: (sjbProfile.industry || "").trim() || null,
       },
       job_preference: {
-        desired_position: (sjbProfile.role || "").trim() || null,
         desired_job_type: (sjbProfile.jobType || "").trim() || null,
         preferred_locations: (() => {
           const prefLoc = sjbProfile.prefLocation;
@@ -172,7 +172,13 @@
         notice_period: (sjbProfile.noticePeriod || "").trim() || null,
         reason_for_change: null,
         earliest_joining_date: null,
-        functional_area: (sjbProfile.functionalArea || sjbProfile.department || "").trim() || null,
+        functional_area: (() => {
+          const fromMore = (sjbProfile.functionalArea || "").trim();
+          const fromDesired = (sjbProfile.functionalAreaDesiredJob || "").trim();
+          const combined = [fromMore, fromDesired].filter(Boolean).join(", ");
+          return combined || null;
+        })(),
+        industry: (sjbProfile.industry || "").trim() || null,
         shift_type: (sjbProfile.shiftType || "").trim() || null,
         current_location: (sjbProfile.location || "").trim() || null,
       },

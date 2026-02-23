@@ -253,6 +253,7 @@ async function sSprofile() {
     noticePeriod: "",
     totalExp: "",
     linkedin_url: "",
+    github:"",
     expectPackage: "",
     prefLocation: "",
     highestDegree: "",
@@ -276,6 +277,7 @@ async function sSprofile() {
     category: "",
     teamHandled: "",
     functionalArea: "",
+    functionalAreaDesiredJob: "",
     shiftType: "",
     physicallyChallanged: "",
     jobType: "",
@@ -372,6 +374,8 @@ async function sSprofile() {
     document
       .querySelector('ul.profile_social_icons li[title="Linkedin"] a[href*="linkedin.com"]')
       ?.getAttribute("href") || "";
+
+  sjbProfile.github = document.querySelector('ul.profile_social_icons li[title="Github"] a[href*="github.com"]')?.getAttribute("href") || "";
 
   // Extract WhatsApp number from wa.me links
   const whatsappLink =
@@ -679,9 +683,8 @@ async function sSprofile() {
         const label = li.querySelector("strong")?.innerText.trim().toLowerCase();
         const value = li.querySelector("em")?.innerText.trim();
         if (label && value) {
-          if (label.includes("job location") && !sjbProfile.prefLocation) {
-            sjbProfile.prefLocation = value;
-          }
+          if (label.includes("job location")) sjbProfile.prefLocation = value;
+          if (label.includes("functional area")) sjbProfile.functionalAreaDesiredJob = value;
           if (label.includes("industry")) sjbProfile.industry = value;
           if (label.includes("job type")) sjbProfile.jobType = value;
           if (label.includes("shift type") || label.includes("shift")) sjbProfile.shiftType = value;
