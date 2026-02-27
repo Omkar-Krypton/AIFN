@@ -19,7 +19,6 @@
       company_description: "",
       company_website: "",
       industry: exp.industry || sjbProfile.industry || "",
-      location: exp.location || "",
       job_title: exp.title || "",
       department: exp.department || "",
       start_date: exp.startDate || "",

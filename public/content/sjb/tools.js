@@ -1,5 +1,7 @@
 /* global chrome */
-const WEB_APP_URL = "https://dms.eticaatest.co.in"
+// const WEB_APP_URL = "https://dms.eticaatest.co.in"
+const WEB_APP_URL = "https://dms.eticaadev.co.in";
+
 
 /**
  * Download CV from URL and convert to base64

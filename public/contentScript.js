@@ -246,7 +246,8 @@ window.addEventListener("message", (event) => {
 // Ported behavior from Working_extension: addNjbBadge() based on verified-ids response.
 // --------------------------------------------------------------------------------------
 
-const WEB_APP_URL ="https://dms.eticaatest.co.in"
+// const WEB_APP_URL ="https://dms.eticaatest.co.in"
+const WEB_APP_URL = "https://dms.eticaadev.co.in";
 
 let lastNjbMatched = null; // [{ index, candidateId, ... }]
 let applyBadgesTimer = null;

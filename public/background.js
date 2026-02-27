@@ -53,22 +53,31 @@ function isDuplicateExtension(ext, myId, myName) {
   return isConflictingExtension(ext, myId);
 }
 
-// Detect if another copy of this extension is installed; store conflict flag.
+// Compute duplicate + Naukri conflict state and persist so background can stop all work when either is true.
+function persistConflictState(extensions, myId, name) {
+  const conflict = (extensions || []).some((e) => isDuplicateExtension(e, myId, name));
+  const naukriConflicts = (extensions || [])
+    .filter((e) => !isDuplicateExtension(e, myId, name) && isConflictingExtension(e, myId));
+  const hasNaukriConflict = naukriConflicts.length > 0;
+  const payload = { conflict: !!conflict, hasNaukriConflict };
+  if (conflict) {
+    const dup = (extensions || []).find((e) => isDuplicateExtension(e, myId, name));
+    if (dup) payload.otherExtension = dup.id;
+  }
+  chrome.storage.local.set(payload);
+}
+
+// Detect if another copy of this extension is installed or another Naukri extension is enabled; store flags.
 function checkDuplicateExtension() {
   if (!chrome?.management?.getAll) return;
   chrome.management.getAll((extensions) => {
     const name = chrome.runtime.getManifest().name;
     const myId = chrome.runtime.id;
-    const duplicates = (extensions || []).filter((e) => isDuplicateExtension(e, myId, name));
-    if (duplicates.length > 0) {
-      chrome.storage.local.set({ conflict: true, otherExtension: duplicates[0].id });
-    } else {
-      chrome.storage.local.set({ conflict: false });
-    }
+    persistConflictState(extensions, myId, name);
   });
 }
 
-// Run duplicate check + conflict check; sendResponse({ conflict, naukriConflicts })
+// Run duplicate check + conflict check; sendResponse({ conflict, naukriConflicts }); also persist so background stops work.
 function handleCheckDuplicate(sendResponse) {
   if (!chrome?.management?.getAll) {
     sendResponse({ conflict: false, naukriConflicts: [] });
@@ -79,18 +88,27 @@ function handleCheckDuplicate(sendResponse) {
     const name = chrome.runtime.getManifest().name;
     const myId = chrome.runtime.id;
 
-    // Strict dupe: same name + overlapping hosts + enabled.
     const conflict = (extensions || []).some((e) => isDuplicateExtension(e, myId, name));
-
-    // Conflict: different extension, enabled, shares our specific job-board hosts.
-    // Exclude duplicates from this list (they are already covered by `conflict`).
     const naukriConflicts = (extensions || [])
       .filter((e) => !isDuplicateExtension(e, myId, name) && isConflictingExtension(e, myId))
       .map((e) => ({ id: e.id, name: e.name, enabled: e.enabled }));
 
+    persistConflictState(extensions, myId, name);
     sendResponse({ conflict, naukriConflicts: naukriConflicts || [] });
   });
   return true; // keep message channel open for async sendResponse
+}
+
+// Returns { conflict, hasNaukriConflict }. If either is true, background must do no Naukri/parsing work.
+function getConflictState() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(["conflict", "hasNaukriConflict"], (result) => {
+      resolve({
+        conflict: !!result.conflict,
+        hasNaukriConflict: !!result.hasNaukriConflict,
+      });
+    });
+  });
 }
 
 chrome.runtime.onStartup.addListener(checkDuplicateExtension);
@@ -192,6 +210,10 @@ const nhTabIdByApplicationId = new Map(); // applicationId -> tabId for ✓ badg
 const nhLastSentSignatureByApplicationId = new Map(); // applicationId -> signature string (dedupe)
 
 async function handleApiInterceptorMessage(msg, sender) {
+  // If duplicate extension or another Naukri extension is active, do no work until user removes/disables it.
+  const { conflict, hasNaukriConflict } = await getConflictState();
+  if (conflict || hasNaukriConflict) return;
+
   // console.log("🔔 Background received message:", msg?.url);
   await ensureAuthTokenLoaded();
   if (!isLoggedIn()) return;
@@ -416,6 +438,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.action === "REQUEST_NJB_VERIFIED_IDS_REFRESH") {
       (async () => {
         try {
+          const { conflict, hasNaukriConflict } = await getConflictState();
+          if (conflict || hasNaukriConflict) {
+            sendResponse({ ok: false });
+            return;
+          }
           if (lastNjbVerifiedIdsPayload?.body) {
             await postVerifiedIdsAndBroadcast(lastNjbVerifiedIdsPayload.body, true);
           }
@@ -430,7 +457,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Verified-IDs / badge support (ported from Working_extension).
     // Content scripts call this on every /v3/search load + route change.
     if (message?.action === "CHECK_NJB_PROFILES") {
-      handleCheckNjbProfiles(message, sendResponse);
+      (async () => {
+        const { conflict, hasNaukriConflict } = await getConflictState();
+        if (conflict || hasNaukriConflict) {
+          try { sendResponse({ matched: [] }); } catch (_) {}
+          return;
+        }
+        return handleCheckNjbProfiles(message, sendResponse);
+      })();
       return true; // async response
     }
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Team Collaboration Extension Testing AI",
-  "version": "1.0.0",
+  "name": "Team Collaboration Extension DEV AI",
+  "version": "2.0.0",
   "permissions": [
     "activeTab",
     "tabs",
@@ -13,7 +13,14 @@
     "system.cpu",
     "management"
   ],
-  "host_permissions": ["<all_urls>"],
+ "host_permissions": [
+  "*://naukri.com/*",
+  "*://*.naukri.com/*",
+  "*://naukrigulf.com/*",
+  "*://*.naukrigulf.com/*",
+  "*://shine.com/*",
+  "*://*.shine.com/*"
+],
   "content_scripts": [
     {
       "matches": ["https://*.naukri.com/*"],
