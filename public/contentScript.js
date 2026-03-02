@@ -30,8 +30,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 function isResdexNaukriRelevantPage() {
   const host = (window.location.hostname || "").toLowerCase();
   if (host !== "resdex.naukri.com") return false;
-  const path = (window.location.pathname || "").toLowerCase();
-  return path.startsWith("/v3/search") || path.startsWith("/v3/preview");
+  const path = (window.location.pathname || "").toLowerCase().replace(/\/$/, "");
+  if (path.startsWith("/v3/search") || path.startsWith("/v3/preview")) return true;
+  if (path === "/v3" && /[?&]sid=/.test(window.location.search || "")) return true;
+  return false;
 }
 
 let lastCanScrapeCheckAt = 0;
@@ -66,8 +68,18 @@ function triggerResdexCanScrapeCheck(reason = "") {
 function isResdexSearchPage() {
   const host = (window.location.hostname || "").toLowerCase();
   if (host !== "resdex.naukri.com") return false;
-  const path = (window.location.pathname || "").toLowerCase();
-  return path.includes("/v3/search") || path === "/v3/search";
+  const path = (window.location.pathname || "").toLowerCase().replace(/\/$/, "");
+  if (path.includes("/v3/search") || path === "/v3/search") return true;
+  // Naukri may use /v3 with sid for listing (e.g. /v3?sid=...&pageNo=1)
+  if (path === "/v3" || path === "/v3/") {
+    try {
+      const sid = new URL(window.location.href).searchParams.get("sid");
+      return typeof sid === "string" && sid.length > 0;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 function isResdexPreviewPage() {
@@ -81,9 +93,14 @@ function isResdexPreviewPage() {
 function extractSearchState(url) {
   try {
     const urlObj = new URL(url);
-    const pathname = urlObj.pathname || "";
-    if (!pathname.includes("/v3/search") && pathname !== "/v3/search") return null;
+    const pathname = (urlObj.pathname || "").replace(/\/$/, "");
     const sid = urlObj.searchParams.get("sid") || "";
+    if (!sid) return null;
+    const isSearchPath =
+      pathname.includes("/v3/search") ||
+      pathname === "/v3/search" ||
+      pathname === "/v3";
+    if (!isSearchPath) return null;
     const pageNo = urlObj.searchParams.get("pageNo") || "1";
     const so = urlObj.searchParams.get("so") || "";
     return { sid, pageNo, so, key: `${sid}_${pageNo}_${so}` };
@@ -138,8 +155,11 @@ function triggerApisForResdexSearchPage() {
 
 function handleResdexUrlChange() {
   const newUrl = window.location.href;
-  const newPath = (window.location.pathname || "").toLowerCase();
-  const isSearchPage = newPath.includes("/v3/search");
+  const newPath = (window.location.pathname || "").toLowerCase().replace(/\/$/, "");
+  const isSearchPage =
+    newPath.includes("/v3/search") ||
+    newPath === "/v3/search" ||
+    (newPath === "/v3" && /[?&]sid=/.test(window.location.search || ""));
   const isPreviewPage = newPath.includes("/preview") || newPath.includes("/profile");
 
   if (newUrl === resdexCurrentUrl) return;
@@ -183,11 +203,12 @@ function setupResdexUrlMonitoring() {
   };
 
   window.addEventListener("locationchange", () => setTimeout(handleResdexUrlChange, 100));
+  window.addEventListener("hashchange", () => setTimeout(handleResdexUrlChange, 100));
 
   const urlPollInterval = setInterval(() => {
     if (window.location.hostname.toLowerCase() !== "resdex.naukri.com") return;
     if (window.location.href !== resdexCurrentUrl) handleResdexUrlChange();
-  }, 500);
+  }, 300);
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return;
@@ -201,11 +222,13 @@ function setupResdexUrlMonitoring() {
 
 function initResdexSearchHandling() {
   if ((window.location.hostname || "").toLowerCase() !== "resdex.naukri.com") return;
+  setupResdexUrlMonitoring();
   if (isResdexSearchPage() && !isResdexPreviewPage()) {
     resdexLastSearchState = extractSearchState(window.location.href);
     triggerResdexVerifiedIdsAndCanScrape();
+    setTimeout(handleResdexUrlChange, 500);
+    setTimeout(handleResdexUrlChange, 1500);
   }
-  setupResdexUrlMonitoring();
 }
 
 if (document.readyState === "loading") {
@@ -286,7 +309,7 @@ async function hasAuthToken() {
 
 function postAuthStateToPage(loggedIn) {
   try {
-    window.postMessage({ source: "EXT_AUTH_STATE", loggedIn: Boolean(loggedIn) }, "*");
+    window.postMessage({ source: "EXT_AUTH_STATE", loggedIn: Boolean(loggedIn) }, window.location.origin);
   } catch {
     // ignore
   }
@@ -319,6 +342,12 @@ async function ensureInjectJsIfLoggedIn() {
 getAuthTokenFromStorage().then((token) => {
   postAuthStateToPage(Boolean(token));
   ensureInjectJsIfLoggedIn();
+  // initResdexSearchHandling() fires before this async callback, so cachedAuthToken was undefined.
+  // Retry verified-ids once token is loaded; also retry after delay for SPA / slow loads.
+  if (token) {
+    triggerResdexVerifiedIdsAndCanScrape();
+    setTimeout(() => triggerResdexVerifiedIdsAndCanScrape(), 2500);
+  }
 });
 
 try {
@@ -337,9 +366,7 @@ try {
 }
 
 function isNjbSearchPage() {
-  const host = (window.location.hostname || "").toLowerCase();
-  const path = (window.location.pathname || "").toLowerCase();
-  return host.includes("naukri.com") && (path === "/v3/search" || path.includes("/v3/search"));
+  return isResdexSearchPage();
 }
 
 function getCandidateCards() {

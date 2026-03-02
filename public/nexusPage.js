@@ -39,6 +39,19 @@
     return (window.location.pathname || "").includes("/v3/preview");
   }
 
+  /** Scopes override logic: only process when request URL matches resume/download/contact patterns. */
+  function isRequestUrlRelevant(url) {
+    if (typeof url !== "string") return false;
+    return (
+      url.includes("/jsprofile/download/resume") ||
+      (url.includes("rm-document-services") && url.includes("/download/applications/")) ||
+      url.includes("contactdetails") ||
+      url.includes("recruiter-js-profile-services") ||
+      url.includes("candidates") ||
+      url.includes("rm-application-detail-services")
+    );
+  }
+
   function installResdexViewPhoneUserClickTracker() {
     try {
       if (window.__nj_view_phone_user_click_tracker_installed) return;
@@ -458,11 +471,8 @@
   window.fetch = async (...args) => {
     if (!extLoggedIn) return originalFetch(...args);
     const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "unknown";
-    // console.log("🔍 Fetch intercepted BEFORE call:", url);
-
     const response = await originalFetch(...args);
-
-    // console.log("🔍 Fetch intercepted AFTER call:", url, "Status:", response.status);
+    if (!isRequestUrlRelevant(url)) return response;
 
     try {
       const clone = response.clone();
@@ -501,7 +511,7 @@
             data: { cvBuffer, nh_jobId: nhIds.jobId, nh_applicationId: nhIds.applicationId },
             pathname: window.location.pathname,
           },
-          "*"
+          window.location.origin
         );
       } else if (ct.includes("application/json")) {
         const data = await clone.json();
@@ -524,7 +534,7 @@
             data,
             pathname: window.location.pathname,
           },
-          "*"
+          window.location.origin
         );
 
         if (typeof clone.url === "string" && clone.url.includes("contactdetails")) {
@@ -557,6 +567,8 @@
 
     xhr.addEventListener("load", async function () {
       if (!extLoggedIn) return;
+      const responseUrl = xhr.responseURL || "";
+      if (!isRequestUrlRelevant(responseUrl)) return;
 
       try {
         const ct = xhr.getResponseHeader("content-type") || "";
@@ -597,7 +609,7 @@
               data: { cvBuffer, nh_jobId: nhIds.jobId, nh_applicationId: nhIds.applicationId },
               pathname: window.location.pathname,
             },
-            "*"
+            window.location.origin
           );
         } else if (ct.includes("application/json")) {
           const data = JSON.parse(xhr.responseText);
@@ -620,7 +632,7 @@
               data,
               pathname: window.location.pathname,
             },
-            "*"
+            window.location.origin
           );
 
           if (typeof xhr.responseURL === "string" && xhr.responseURL.includes("contactdetails")) {
@@ -659,11 +671,16 @@
       typeof window.__api_interceptor_block_downloads_until === "number" &&
       Date.now() < window.__api_interceptor_block_downloads_until;
 
+    const isRelevantPageForDownloadBlock = () => {
+      const path = (window.location.pathname || "").toLowerCase();
+      return path.includes("/preview") || path.includes("/profile") || /\/hiring\/[^/]+\/apply\//i.test(path);
+    };
+
     // Block <a download> clicks / blob: navigations during the short window after we trigger Download CV.
     const originalAnchorClick = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function (...args) {
       try {
-        if (shouldBlockNow()) {
+        if (shouldBlockNow() && isRelevantPageForDownloadBlock()) {
           const href = (this.getAttribute("href") || "").toLowerCase();
           const hasDownload = this.hasAttribute("download");
           if (hasDownload || href.startsWith("blob:")) {
@@ -680,7 +697,7 @@
     const originalWindowOpen = window.open;
     window.open = function (url, target, features) {
       try {
-        if (shouldBlockNow() && typeof url === "string" && url.toLowerCase().startsWith("blob:")) {
+        if (shouldBlockNow() && isRelevantPageForDownloadBlock() && typeof url === "string" && url.toLowerCase().startsWith("blob:")) {
           console.log("🛑 Blocked blob window.open during CV capture");
           return null;
         }

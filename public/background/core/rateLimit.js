@@ -243,7 +243,10 @@ export function handleCheckCanScrape(message, sender, sendResponse) {
           }
 
           if (url.hostname === resdexHost) {
-            const isAllowed = resdexAllowedPaths.some((p) => url.pathname.startsWith(p));
+            const path = (url.pathname || "").replace(/\/$/, "");
+            const isAllowed =
+              resdexAllowedPaths.some((p) => path.startsWith(p.replace(/\/$/, ""))) ||
+              (path === "/v3" && url.searchParams?.get("sid"));
             if (!isAllowed) {
               sendResponse({ canScrape: true, reason: "SKIP_RESTDEX_PATH", maxLimit: 0, used: 0, remaining: 0 });
               return;

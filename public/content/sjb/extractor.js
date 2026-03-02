@@ -730,7 +730,7 @@ async function sSprofile() {
   });
 
   const transformedProfile = transformSjbProfile(sjbProfile);
-  window.postMessage({ type: "SJB_PROFILE_DATA", data: transformedProfile }, "*");
+  window.postMessage({ type: "SJB_PROFILE_DATA", data: transformedProfile }, window.location.origin);
   chrome.storage?.local?.set?.({ lastSjbProfile: sjbProfile });
   window.lastScrapedSjbProfile = sjbProfile;
   return sjbProfile;

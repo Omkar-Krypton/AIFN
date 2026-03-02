@@ -1503,7 +1503,10 @@ async function maybeSendCombinedCandidateToCandidatesApi(userId) {
         const tabs = await new Promise((resolve) => chrome.tabs.query({}, resolve));
         const naukriTabs = (tabs || []).filter((t) => {
           const u = (t?.url || "").toLowerCase();
-          return u.includes("naukri.com") && u.includes("/v3/search");
+          if (!u.includes("naukri.com")) return false;
+          if (u.includes("/v3/search")) return true;
+          if (u.includes("resdex.naukri.com/v3") && u.includes("sid=")) return true;
+          return false;
         });
         for (const tab of naukriTabs) {
           if (!tab?.id) continue;

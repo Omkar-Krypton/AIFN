@@ -62,7 +62,7 @@ const AuthGuard = ({ children }) => {
         }
 
         if (response?.status === 401 || response?.status === 403) {
-          // Token invalid/expired: force logout and show message on login screen.
+          // Token invalid/expired (e.g. logged in on another device): clear auth and show message.
           try {
             const data = await response.json();
             if (data?.message) {
@@ -78,6 +78,7 @@ const AuthGuard = ({ children }) => {
             // ignore
           }
 
+          await logOutAndClearCookies();
           setAuthStatus("unauthenticated");
           return;
         }
