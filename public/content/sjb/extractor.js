@@ -340,20 +340,16 @@ async function sSprofile() {
   }
 
   // Extract notice period - get text content excluding the strong tag
-  const noticePeriodEl = document.querySelector(".notice-period");
-  if (noticePeriodEl) {
-    const strongEl = noticePeriodEl.querySelector("strong");
-    let noticePeriodText = noticePeriodEl.innerText || noticePeriodEl.textContent || "";
-    if (strongEl) {
-      noticePeriodText = noticePeriodText.replace(strongEl.innerText, "").trim();
-    } else {
-      noticePeriodText = noticePeriodText.replace(/Notice Period/gi, "").trim();
-    }
-    sjbProfile.noticePeriod = normalizeNoticePeriod(noticePeriodText);
-  } else {
-    sjbProfile.noticePeriod = "";
-  }
+  const noticePeriodEl = document.querySelector(".profile_notice_pref_value");
 
+if (noticePeriodEl) {
+  const noticePeriodText =
+    noticePeriodEl.innerText || noticePeriodEl.textContent || "";
+
+  sjbProfile.noticePeriod = normalizeNoticePeriod(noticePeriodText.trim());
+} else {
+  sjbProfile.noticePeriod = "";
+}
   // Extract last_active and modified_at from active-i-style element
   const activeStyleEl = document.querySelector("i.active-i-style");
   if (activeStyleEl) {
