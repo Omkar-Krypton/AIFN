@@ -272,17 +272,21 @@ async function handleApiInterceptorMessage(msg, sender) {
         return;
       }
 
-      return uploadResume(
-        {
-          candidate_id: String(backendCandidateId),
-          cvBuffer,
-          cv_updated_at,
-        },
-        {
-          userId: appDetail?.jobSeekerUserId ? String(appDetail.jobSeekerUserId) : String(applicationId),
-          job_board: "NH",
-        }
-      );
+      // Resume arrived after candidate was already saved.
+      // POST /candidates/upload-resume is no longer called separately.
+      // return uploadResume(
+      //   {
+      //     candidate_id: String(backendCandidateId),
+      //     cvBuffer,
+      //     cv_updated_at,
+      //   },
+      //   {
+      //     userId: appDetail?.jobSeekerUserId ? String(appDetail.jobSeekerUserId) : String(applicationId),
+      //     job_board: "NH",
+      //   }
+      // );
+      console.log("⏭️  [NH] Resume arrived after candidate save — skipping separate upload (resume sent in /candidates payload)");
+      return;
     }
 
     const userIdKey = latestPreviewUserId ? String(latestPreviewUserId) : null;
@@ -303,15 +307,18 @@ async function handleApiInterceptorMessage(msg, sender) {
     const profileData = userIdKey ? profileByUserId.get(userIdKey) : null;
     const cv_updated_at = getCvUpdatedAtForResume(profileData);
 
-    return uploadResume(
-      {
-      candidate_id: backendCandidateId,
-      cvBuffer,
-      // Backend expects YYYY-MM-DD (string) or null
-      cv_updated_at,
-      },
-      { userId: userIdKey, job_board: "NJ" }
-    );
+    // Resume arrived after candidate was already saved.
+    // POST /candidates/upload-resume is no longer called separately.
+    // return uploadResume(
+    //   {
+    //   candidate_id: backendCandidateId,
+    //   cvBuffer,
+    //   cv_updated_at,
+    //   },
+    //   { userId: userIdKey, job_board: "NJ" }
+    // );
+    console.log("⏭️  [NJ] Resume arrived after candidate save — skipping separate upload (resume sent in /candidates payload)");
+    return;
   }
 
   // ------------------------------------------------------------------------------------
@@ -605,7 +612,8 @@ async function uploadResume(data, opts = {}) {
     // console.log("upload-resume response body:", resultText);
 
     if (res.ok) {
-      await maybeMapCustomerToCandidateAfterResumeUpload(opts?.userId, data?.candidate_id, opts?.job_board);
+      // customer-candidate-mapping API is no longer called.
+      // await maybeMapCustomerToCandidateAfterResumeUpload(opts?.userId, data?.candidate_id, opts?.job_board);
     }
   } catch (err) {
     console.error("❌ Failed to upload resume:", err);
@@ -789,6 +797,16 @@ async function maybeSendNhCombinedCandidate(applicationId) {
 
     const payload = mapProfileResponseToCandidatesPayload(profileLike, contactLike);
     payload.source = "NH";
+
+    // Include resume data in the /candidates payload if already buffered for this application.
+    const bufferedNhResume = nhResumeByApplicationId.get(appId);
+    if (bufferedNhResume?.cvBuffer) {
+      payload.cvBuffer = bufferedNhResume.cvBuffer;
+      payload.cvHtml = null;
+      payload.cv_updated_at = bufferedNhResume.cv_updated_at || null;
+      nhResumeByApplicationId.delete(appId);
+    }
+
     // NH does not provide desired position or functional area; do not send them.
     if (payload.job_preference) {
       payload.job_preference.desired_job_type = { job_type: "", employment_status: "" };
@@ -829,23 +847,23 @@ async function maybeSendNhCombinedCandidate(applicationId) {
     if (candidateId) {
       nhBackendCandidateIdByApplicationId.set(appId, String(candidateId));
 
-      // If resume was captured earlier, upload it now.
-      const pending = nhResumeByApplicationId.get(appId);
-      if (pending?.cvBuffer) {
-        nhResumeByApplicationId.delete(appId);
-        await uploadResume(
-          {
-            candidate_id: String(candidateId),
-            cvBuffer: pending.cvBuffer,
-            cv_updated_at: pending.cv_updated_at || null,
-          },
-          {
-            // Use jobSeekerUserId for mapping identity (stable across applications).
-            userId: appDetail?.jobSeekerUserId ? String(appDetail.jobSeekerUserId) : appId,
-            job_board: "NH",
-          }
-        );
-      }
+      // Resume is now included directly in the /candidates payload above.
+      // POST /candidates/upload-resume is no longer called separately.
+      // const pending = nhResumeByApplicationId.get(appId);
+      // if (pending?.cvBuffer) {
+      //   nhResumeByApplicationId.delete(appId);
+      //   await uploadResume(
+      //     {
+      //       candidate_id: String(candidateId),
+      //       cvBuffer: pending.cvBuffer,
+      //       cv_updated_at: pending.cv_updated_at || null,
+      //     },
+      //     {
+      //       userId: appDetail?.jobSeekerUserId ? String(appDetail.jobSeekerUserId) : appId,
+      //       job_board: "NH",
+      //     }
+      //   );
+      // }
 
       // Paint ✓ on the Hiring details page. Catch sendMessage rejection (tab may have no content script).
       const tabId = nhTabIdByApplicationId.get(appId);
@@ -1427,6 +1445,15 @@ async function maybeSendCombinedCandidateToCandidatesApi(userId) {
 
     const payload = mapProfileResponseToCandidatesPayload(profileData, contactDetails);
 
+    // Include resume data in the /candidates payload if already buffered for this user.
+    const bufferedResume = pendingResumeByUserId.get(String(userId));
+    if (bufferedResume?.cvBuffer) {
+      payload.cvBuffer = bufferedResume.cvBuffer;
+      payload.cvHtml = null;
+      payload.cv_updated_at = bufferedResume.cv_updated_at || null;
+      pendingResumeByUserId.delete(String(userId));
+    }
+
     const res = await fetch(CANDIDATES_API_URL, {
       method: "POST",
       headers: {
@@ -1464,19 +1491,20 @@ async function maybeSendCombinedCandidateToCandidatesApi(userId) {
       backendCandidateIdByUserId.set(String(userId), String(candidateId));
       console.log("✅ Captured backend candidate_id for resume upload:", String(candidateId));
 
-      // If resume was captured earlier, upload it now.
-      const pending = pendingResumeByUserId.get(String(userId));
-      if (pending?.cvBuffer) {
-        pendingResumeByUserId.delete(String(userId));
-        await uploadResume(
-          {
-          candidate_id: String(candidateId),
-          cvBuffer: pending.cvBuffer,
-          cv_updated_at: pending.cv_updated_at || null,
-          },
-          { userId }
-        );
-      }
+      // Resume is now included directly in the /candidates payload above.
+      // POST /candidates/upload-resume is no longer called separately.
+      // const pending = pendingResumeByUserId.get(String(userId));
+      // if (pending?.cvBuffer) {
+      //   pendingResumeByUserId.delete(String(userId));
+      //   await uploadResume(
+      //     {
+      //     candidate_id: String(candidateId),
+      //     cvBuffer: pending.cvBuffer,
+      //     cv_updated_at: pending.cv_updated_at || null,
+      //     },
+      //     { userId }
+      //   );
+      // }
 
       // Preview-page ✓ badge. Catch sendMessage rejection (tab may have no content script).
       const tabId = previewTabIdByUserId.get(String(userId)) || latestPreviewTabId;

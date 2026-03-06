@@ -35,10 +35,13 @@ export async function handleSjbProfile(message, sender, sendResponse) {
     const resumePdfData = message.resumePdfData || null;
     const resumeFileName = message.resumeFileName || null;
 
-    // Profile data without resume fields (resume is uploaded separately)
+    // Profile data with resume fields included in the same /candidates payload
     const profileDataWithUserId = {
       ...message.data,
       source: "SJ",
+      cvBuffer: resumePdfData || null,
+      cvHtml: null,
+      cv_updated_at: message.data.cv_updated_at || null,
     };
 
     // Remove resume fields from profile data if they exist (shouldn't be there, but just in case)
@@ -57,94 +60,19 @@ export async function handleSjbProfile(message, sender, sendResponse) {
         const responseBody = await response.json().catch(() => ({}));
 
         if (response.ok) {
-          // Get user data for mapping
-          const userResponse = await fetch(`${ETICA_EXT_URL}/profile/me`, {
-            method: "GET",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: storedToken ? `Bearer ${storedToken}` : "",
-            },
-          });
-          const userData = await userResponse.json().catch(() => ({}));
+          // customer-candidate-mapping API is no longer called.
+          // // Get user data for mapping
+          // const userResponse = await fetch(`${ETICA_EXT_URL}/profile/me`, { ... });
+          // const userData = await userResponse.json().catch(() => ({}));
+          // const mapData = { customerId: "", candidateId: "", scrappedBy: "", job_board: "SJ" };
+          // if (userResponse.ok) { mapData.candidateId = ...; mapData.scrappedBy = ...; mapData.customerId = ...; }
+          // if (mapData.candidateId && mapData.scrappedBy) {
+          //   await fetch(`${ETICA_EXT_URL}/customer-candidate-mapping`, { ... }).catch(() => null);
+          //   chrome.tabs.query({}, (allTabs) => { ... });
+          //   if (sender.tab && sender.tab.id) { chrome.tabs.sendMessage(sender.tab.id, { type: "SJB_EXTRACT_AND_VERIFY_IDS" }).catch(() => {}); }
+          // }
 
-          // Prepare mapping data
-          const mapData = {
-            customerId: "",
-            candidateId: "",
-            scrappedBy: "",
-            job_board: "SJ",
-          };
-
-          if (userResponse.ok) {
-            // Extract candidate ID from response
-            mapData.candidateId =
-              responseBody?.data?.data?.profile?.id ||
-              responseBody?.data?.data?.profile?._id ||
-              responseBody?.data?.data?.id ||
-              responseBody?.data?.data?._id ||
-              responseBody?.data?.profile?.id ||
-              responseBody?.data?.profile?._id ||
-              responseBody?.data?.id ||
-              responseBody?.data?._id ||
-              responseBody?.id ||
-              responseBody?._id ||
-              responseBody?.person?._id ||
-              responseBody?.person?.id ||
-              responseBody?.candidate?.id ||
-              responseBody?.candidate?._id ||
-              "";
-            mapData.scrappedBy = userData?.data?.data?._id || userData?.data?._id || "";
-            mapData.customerId =
-              userData?.data?.data?.customerId || userData?.data?.customerId || "";
-          }
-
-          // Call mapping API after candidate is saved
-          if (mapData.candidateId && mapData.scrappedBy) {
-            try {
-              await fetch(`${ETICA_EXT_URL}/customer-candidate-mapping`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  Authorization: storedToken ? `Bearer ${storedToken}` : "",
-                },
-                body: JSON.stringify(mapData),
-              }).catch(() => null);
-
-              // After mapping API, refresh Shine badges on all Shine tabs
-              chrome.tabs.query({}, (allTabs) => {
-                const shineTabs = (allTabs || []).filter((tab) => {
-                  if (!tab.url) return false;
-                  const url = tab.url.toLowerCase();
-                  return url.includes("shine.com") || url.includes("recruiter.shine.com");
-                });
-
-                shineTabs.forEach((tab) => {
-                  chrome.tabs
-                    .sendMessage(tab.id, {
-                      type: "SJB_REFRESH_BADGES",
-                    })
-                    .catch(() => {
-                      // ignore
-                    });
-                });
-              });
-
-              // Also request extraction on the active profile tab
-              if (sender.tab && sender.tab.id) {
-                chrome.tabs
-                  .sendMessage(sender.tab.id, {
-                    type: "SJB_EXTRACT_AND_VERIFY_IDS",
-                  })
-                  .catch(() => {
-                    // ignore
-                  });
-              }
-            } catch (mapError) {
-              console.error("[SJB Handler] Mapping API error:", mapError);
-            }
-          }
-
-          // Extract candidate_id for resume upload - try multiple possible response structures
+          // Extract candidate_id for SJB_PROFILE_SUCCESS badge - try multiple possible response structures
           const candidateId =
             responseBody?.data?.data?.profile?.id ||
             responseBody?.data?.data?.profile?._id ||
@@ -174,21 +102,18 @@ export async function handleSjbProfile(message, sender, sendResponse) {
                 // ignore
               });
 
-            // Trigger resume upload after profile is saved if resumePdfData exists and candidateId is available
-            if (resumePdfData && candidateId) {
-              setTimeout(() => {
-                chrome.tabs
-                  .sendMessage(sender.tab.id, {
-                    type: "SJB_TRIGGER_RESUME_UPLOAD",
-                    candidateId: candidateId,
-                    resumePdfData: resumePdfData,
-                    resumeFileName: resumeFileName,
-                  })
-                  .catch(() => {
-                    // ignore
-                  });
-              }, 2000);
-            }
+            // Resume is now included directly in the /candidates payload above.
+            // POST /candidates/upload-resume is no longer triggered separately.
+            // if (resumePdfData && candidateId) {
+            //   setTimeout(() => {
+            //     chrome.tabs.sendMessage(sender.tab.id, {
+            //       type: "SJB_TRIGGER_RESUME_UPLOAD",
+            //       candidateId: candidateId,
+            //       resumePdfData: resumePdfData,
+            //       resumeFileName: resumeFileName,
+            //     }).catch(() => {});
+            //   }, 2000);
+            // }
           } else {
             chrome.tabs.query({}, function (tabs) {
               for (let tab of tabs) {
@@ -202,20 +127,18 @@ export async function handleSjbProfile(message, sender, sendResponse) {
                     // ignore
                   });
 
-                if (resumePdfData && candidateId) {
-                  setTimeout(() => {
-                    chrome.tabs
-                      .sendMessage(tab.id, {
-                        type: "SJB_TRIGGER_RESUME_UPLOAD",
-                        candidateId: candidateId,
-                        resumePdfData: resumePdfData,
-                        resumeFileName: resumeFileName,
-                      })
-                      .catch(() => {
-                        // ignore
-                      });
-                  }, 2000);
-                }
+                // Resume is now included directly in the /candidates payload above.
+                // POST /candidates/upload-resume is no longer triggered separately.
+                // if (resumePdfData && candidateId) {
+                //   setTimeout(() => {
+                //     chrome.tabs.sendMessage(tab.id, {
+                //       type: "SJB_TRIGGER_RESUME_UPLOAD",
+                //       candidateId: candidateId,
+                //       resumePdfData: resumePdfData,
+                //       resumeFileName: resumeFileName,
+                //     }).catch(() => {});
+                //   }, 2000);
+                // }
               }
             });
           }
