@@ -28,6 +28,7 @@ function ShareSession() {
   const [selectedTeamMembers, setSelectedTeamMembers] = useState(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [latestExtensionVersion, setLatestExtensionVersion] = useState(null);
+  const [membersLoading, setMembersLoading] = useState(false);
   const dropdownRef = useRef();
   const navigate = useNavigate();
 
@@ -93,6 +94,7 @@ function ShareSession() {
         } catch (e) {
           console.log("Profile fetch failed:", e);
         }
+        setMembersLoading(true)
 
         const response = await fetch(`${API_URL}/api/ext/sessions/users`, {
           headers: { Authorization: `Bearer ${storedToken}` },
@@ -126,12 +128,15 @@ function ShareSession() {
             setUsers(Array.isArray(allUsers) ? allUsers : []);
             setTeams([]);
           }
+          setMembersLoading(false);
         } else {
           setUsers(Array.isArray(data?.data) ? data.data : []);
           setTeams([]);
+          setMembersLoading(false);
         }
         setError("");
       } catch (e) {
+        setMembersLoading(false);
         fail("Internal server error.");
         console.error(e);
       }
@@ -604,13 +609,18 @@ function ShareSession() {
                   </div>
 
                   <div className="max-h-40 overflow-y-auto">
-                    {filteredUsers.length === 0 ? (
-                      <div className="px-2 py-2 text-center text-gray-500">
-                        <Users className="w-5 h-5 mx-auto mb-1 opacity-50" />
-                        <p className="text-xs">{searchQuery ? "No users found" : "No users available"}</p>
-                      </div>
-                    ) : (
-                      filteredUsers.map((user) => {
+  {membersLoading ? (
+    <div className="px-2 py-3 flex items-center justify-center text-gray-500">
+      <Loader2 className="w-4 h-4 animate-spin mr-2" />
+      <span className="text-xs">Loading teams/users...</span>
+    </div>
+  ) : filteredUsers.length === 0 ? (
+    <div className="px-2 py-2 text-center text-gray-500">
+      <Users className="w-5 h-5 mx-auto mb-1 opacity-50" />
+      <p className="text-xs">{searchQuery ? "No users found" : "No users available"}</p>
+    </div>
+  ) : (
+    filteredUsers.map((user) => {
                         const userId = user._id || user.id || user.userId;
                         const isSelected = selectedUserIds.includes(userId);
                         return (

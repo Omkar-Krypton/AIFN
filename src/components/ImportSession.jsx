@@ -30,6 +30,7 @@ function ImportSession() {
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [latestExtensionVersion, setLatestExtensionVersion] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [sessionLoading, setSessionLoading] = useState(true);
 
   useEffect(() => {
     if (!showUpdateModal) return;
@@ -42,6 +43,8 @@ function ImportSession() {
 
   const fetchSessions = async () => {
     try {
+
+      setSessionLoading(true)
       const { storedToken } = await getStoredAuth();
       if (!storedToken) return navigate("/login");
 
@@ -141,6 +144,9 @@ function ImportSession() {
       } else {
         setError("Something went wrong. Please try again.");
       }
+    }
+    finally {
+      setSessionLoading(false);
     }
   };
 
@@ -354,12 +360,17 @@ function ImportSession() {
 
             {isDropdownOpen && (
               <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-xl overflow-hidden cursor-pointer">
-                {activeSessions?.length === 0 ? (
-                  <div className="px-2 py-2 text-center text-gray-500">
-                    <Globe className="w-6 h-6 mx-auto mb-2 opacity-50" />
-                    <p className="text-sm">No active links available</p>
-                  </div>
-                ) : (
+                {sessionLoading ? (
+  <div className="px-2 py-4 flex flex-col items-center text-gray-500">
+    <Loader2 className="w-5 h-5 animate-spin mb-2" />
+    <p className="text-sm">Loading sessions...</p>
+  </div>
+) : activeSessions?.length === 0 ? (
+  <div className="px-2 py-2 text-center text-gray-500">
+    <Globe className="w-6 h-6 mx-auto mb-2 opacity-50" />
+    <p className="text-sm">No active links available</p>
+  </div>
+) : (
                   <div className="max-h-48 overflow-y-auto">
                     {activeSessions?.map((session) => {
                       const sessionDisplay = formatSessionDisplay(session);

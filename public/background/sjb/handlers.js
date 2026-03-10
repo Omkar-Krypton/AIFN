@@ -101,7 +101,7 @@ export async function handleSjbProfile(message, sender, sendResponse) {
           // Call mapping API after candidate is saved
           if (mapData.candidateId && mapData.scrappedBy) {
             try {
-              await fetch(`${ETICA_EXT_URL}/customer-candidate-mapping`, {
+              await fetch(`${PROFILE_API_URL}/customer_ccandidate_mapping`, {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",

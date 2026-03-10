@@ -1,6 +1,6 @@
 /* global chrome */
-// const WEB_APP_URL = "https://dms.eticaatest.co.in"
-const WEB_APP_URL = "https://dms.eticaadev.co.in";
+const WEB_APP_URL = "https://dms.eticaatest.co.in"
+// const WEB_APP_URL = "https://dms.eticaadev.co.in";
 
 
 /**

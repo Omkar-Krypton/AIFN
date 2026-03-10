@@ -541,7 +541,7 @@ async function postCustomerCandidateMapping(mapData) {
   const authHeader = getBearerAuthHeaderValue();
   if (!authHeader) return;
 
-  await fetch(`${ETICA_EXT_URL}/customer-candidate-mapping`, {
+  await fetch(`${PROFILE_API_URL}/customer_candidate_mapping`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
