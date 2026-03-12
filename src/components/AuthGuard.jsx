@@ -75,7 +75,15 @@ const AuthGuard = ({ children }) => {
               }
             }
           } catch {
-            // ignore
+            // ignore JSON/message issues
+          }
+
+          // Explicitly clear extension auth/session state so stale tokens are not left behind
+          // even if this check runs when the popup is first opened.
+          try {
+            await logOutAndClearCookies();
+          } catch {
+            // Never block UI if cleanup fails
           }
 
           setAuthStatus("unauthenticated");

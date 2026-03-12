@@ -72,7 +72,32 @@ function Login() {
         await new Promise((resolve) => chrome.storage.local.remove(["forceLogoutMessage"], resolve));
       }
       localStorage.removeItem("forceLogoutMessage");
-      if (msg) setError(msg);
+      if (msg) {
+        setError(msg);
+
+        // As a safety net, if the message indicates a terminated session / other-device login,
+        // explicitly clear any lingering auth tokens from both extension storage and localStorage.
+        const lowerMsg = msg.toLowerCase();
+        if (
+          lowerMsg.includes("session terminated") ||
+          lowerMsg.includes("logged in on another device")
+        ) {
+          try {
+            if (typeof chrome !== "undefined" && chrome?.storage?.local) {
+              await new Promise((resolve) =>
+                chrome.storage.local.remove(["authToken"], resolve)
+              );
+            }
+          } catch {
+            // ignore storage errors
+          }
+          try {
+            localStorage.removeItem("authToken");
+          } catch {
+            // ignore localStorage errors
+          }
+        }
+      }
     };
     initLogOut();
   }, []);

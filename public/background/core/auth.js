@@ -9,3 +9,11 @@ export const getStoredAuth = async () => {
   });
 };
 
+export const clearStoredAuth = async () => {
+  try {
+    await chrome.storage.local.remove(["authToken"]);
+  } catch {
+    // ignore
+  }
+};
+

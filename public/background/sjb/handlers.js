@@ -65,6 +65,16 @@ export async function handleSjbProfile(message, sender, sendResponse) {
               Authorization: storedToken ? `Bearer ${storedToken}` : "",
             },
           });
+
+          // If session is invalid (401/403), clear stored auth so the extension reflects logout.
+          if (userResponse && (userResponse.status === 401 || userResponse.status === 403)) {
+            try {
+              await chrome.storage.local.remove(["authToken"]);
+            } catch {
+              // ignore
+            }
+          }
+
           const userData = await userResponse.json().catch(() => ({}));
 
           // Prepare mapping data

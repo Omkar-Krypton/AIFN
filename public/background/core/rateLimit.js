@@ -1,5 +1,5 @@
 /* global chrome */
-import { ETICA_EXT_URL } from "../../config/constants.js";
+import { ETICA_EXT_URL, PROFILE_API_URL } from "../../config/constants.js";
 import { getStoredAuth } from "./auth.js";
 
 // Cache for rate limit checks to prevent multiple API calls
@@ -42,8 +42,14 @@ export async function checkCanScrape(jobBoard) {
         },
       });
 
-      // 401/403 = session invalid (e.g. logged out on another device). Do not show popup or freeze.
+      // 401/403 = session invalid (e.g. logged out on another device). Do not show popup or freeze,
+      // but DO clear the auth token so the extension reflects the logged-out state.
       if (userResponse.status === 401 || userResponse.status === 403) {
+        try {
+          await chrome.storage.local.remove(["authToken"]);
+        } catch {
+          // ignore
+        }
         return { canScrape: true, reason: "UNAUTHORIZED" };
       }
 
@@ -63,7 +69,7 @@ export async function checkCanScrape(jobBoard) {
     // Use job board identifier directly: "NJ" for Naukri, "SJ" for Shine
     const jobBoardParam = jobBoard;
 
-    const apiUrl = `${ETICA_EXT_URL}/scraping-limits/can-scrape?customerId=${customerId}&userId=${userId}&jobBoard=${jobBoardParam}`;
+    const apiUrl = `${PROFILE_API_URL}/scraping-limits/can-scrape?customerId=${customerId}&userId=${userId}&jobBoard=${jobBoardParam}`;
     const response = await fetch(apiUrl, {
       method: "GET",
       headers: {

@@ -1,4 +1,4 @@
-import { getStoredAuth } from "./background/core/auth.js";
+import { getStoredAuth, clearStoredAuth } from "./background/core/auth.js";
 import { ETICA_EXT_URL, PROFILE_API_URL, WEB_APP_URL } from "./config/constants.js";
 import {
   extractNhIdsFromPathname,
@@ -158,12 +158,81 @@ async function ensureAuthTokenLoaded() {
 // Fire-and-forget init.
 ensureAuthTokenLoaded();
 
+// Keep authTokenCache in sync with storage.
 if (chrome?.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== "local") return;
     if (!changes || !Object.prototype.hasOwnProperty.call(changes, "authToken")) return;
     authTokenCache = changes.authToken?.newValue ? String(changes.authToken.newValue) : "";
   });
+}
+
+// -----------------------------------------------------------------------------
+// Background session health check
+// -----------------------------------------------------------------------------
+// In addition to popup/AuthGuard checks and websocket force-logout, we run a
+// lightweight periodic background check so that "logged in on another device"
+// events are eventually reflected even when the popup is closed.
+
+async function runBackgroundSessionHealthCheck() {
+  try {
+    await ensureAuthTokenLoaded();
+    const token = getAuthToken();
+    if (!token) return;
+
+    const res = await fetch(`${ETICA_EXT_URL}/profile/me`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+    }).catch(() => null);
+
+    if (!res) return;
+
+    if (res.status === 401 || res.status === 403) {
+      // Session invalid/terminated on server side.
+      let message =
+        "Authentication failed: Session terminated - You have been logged in on another device";
+      try {
+        const data = await res.json().catch(() => null);
+        if (data?.message && typeof data.message === "string") {
+          message = data.message;
+        }
+      } catch {
+        // ignore JSON parse issues; fall back to default message.
+      }
+
+      try {
+        await chrome.storage.local.set({ forceLogoutMessage: message });
+      } catch {
+        // ignore; Login.jsx also checks localStorage fallback.
+      }
+
+      try {
+        await clearStoredAuth();
+      } catch {
+        // ignore
+      }
+    }
+  } catch (e) {
+    // Keep service worker alive; avoid throwing.
+    console.warn("[Background] Session health check failed:", e);
+  }
+}
+
+// Use alarms for periodic checks when available (MV3-friendly).
+if (chrome?.alarms) {
+  try {
+    // Run every 5 minutes; lightweight GET with Bearer.
+    chrome.alarms.create("SESSION_HEALTH_CHECK", { periodInMinutes: 5 });
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm?.name !== "SESSION_HEALTH_CHECK") return;
+      runBackgroundSessionHealthCheck();
+    });
+  } catch {
+    // ignore alarm setup failures
+  }
 }
 
 // Resume uploads must use the backend UUID returned by POST /candidates.
@@ -525,6 +594,17 @@ async function fetchMappingUserInfo() {
       Authorization: authHeader,
     },
   }).catch(() => null);
+
+  // If backend says the session is invalid (logged in elsewhere / token expired),
+  // clear the stored auth so the extension reflects the logged-out state.
+  if (userResponse && (userResponse.status === 401 || userResponse.status === 403)) {
+    try {
+      await clearStoredAuth();
+    } catch {
+      // ignore
+    }
+    return { customerId: "", scrappedBy: "" };
+  }
 
   if (!userResponse || !userResponse.ok) return { customerId: "", scrappedBy: "" };
 
